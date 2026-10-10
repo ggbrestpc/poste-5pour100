@@ -109,6 +109,10 @@ Chaque type de tâche se branche dans `main.rs`, dans le `match kind { … }` de
 - **`emargement`** → ouvre la feuille d'émargement (champ `url`) dans le navigateur.
 - **`affichage`** → ouvre une page en plein écran (champ `url`, défaut `/ecran`) sur l'écran du poste —
   pratique pour une TV d'accueil ou de salle.
+- **`diffusion`** → « séance guidée » : ouvre le contenu poussé par le formateur (quiz, formulaire, vidéo,
+  champ `url`) dans une fenêtre **plein écran, toujours au premier plan, non fermable** — l'élève ne peut que
+  suivre. `{"end": true}` ferme la séance. Verrouillage au mieux (empêche fermer/réduire ; pas les raccourcis
+  système bas niveau).
 
 Chaque tâche est **acquittée** au serveur (succès ou erreur), et rejouée en cas de coupure réseau.
 

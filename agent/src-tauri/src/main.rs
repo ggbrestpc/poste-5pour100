@@ -287,6 +287,40 @@ async fn pair(app: AppHandle, code: String, server_url: String, name: String) ->
     Ok("Poste relié à votre espace.".to_string())
 }
 
+/// Ouvre une fenêtre « séance guidée » verrouillée : plein écran, toujours au premier plan, non
+/// fermable (l'élève ne peut que suivre le contenu poussé par le formateur). Le verrouillage est au
+/// mieux : il empêche de fermer/réduire la fenêtre, pas les raccourcis système bas niveau (Alt+Tab…).
+fn open_locked(app: &AppHandle, url: &str) -> Result<(), String> {
+    if let Some(w) = app.get_webview_window("diffusion") {
+        let _ = w.show();
+        let _ = w.set_focus();
+        return Ok(());
+    }
+    let u = url::Url::parse(url).map_err(|e| format!("Adresse invalide : {e}"))?;
+    let w = WebviewWindowBuilder::new(app, "diffusion", WebviewUrl::External(u))
+        .title("Séance guidée — 5pour100")
+        .fullscreen(true)
+        .always_on_top(true)
+        .closable(false)
+        .build()
+        .map_err(|e| e.to_string())?;
+    let wc = w.clone();
+    w.on_window_event(move |e| {
+        if let WindowEvent::CloseRequested { api, .. } = e {
+            api.prevent_close();
+            let _ = wc.set_focus();
+        }
+    });
+    Ok(())
+}
+
+/// Ferme la séance guidée (fin poussée par le formateur).
+fn close_locked(app: &AppHandle) {
+    if let Some(w) = app.get_webview_window("diffusion") {
+        let _ = w.destroy();
+    }
+}
+
 /// Pousse l'état courant vers l'interface (point vert, dernière synchro, dernière action).
 fn emit_status(app: &AppHandle, connected: bool, last_action: &str, jobs_total: u64) {
     let _ = app.emit(
@@ -368,6 +402,7 @@ async fn sync_loop(app: AppHandle, state: Arc<Mutex<Vec<serde_json::Value>>>) {
                     "partage_fichier" => "Fichier reçu",
                     "emargement" => "Émargement ouvert",
                     "affichage" => "Affichage à l'écran",
+                    "diffusion" => "Séance guidée",
                     _ => "Tâche reçue",
                 }
                 .to_string();
@@ -408,6 +443,25 @@ async fn sync_loop(app: AppHandle, state: Arc<Mutex<Vec<serde_json::Value>>>) {
                                 acks.push(json!({ "jobId": id, "result": { "ok": true } }));
                             }
                             None => acks.push(json!({ "jobId": id, "error": "url d'émargement manquante" })),
+                        }
+                    }
+                    "diffusion" => {
+                        // Séance guidée : l'élève ne peut que suivre le contenu (quiz, formulaire, vidéo…).
+                        // payload.end = true ferme la séance ; sinon payload.url ouvre la fenêtre verrouillée.
+                        if payload.get("end").and_then(|v| v.as_bool()).unwrap_or(false) {
+                            close_locked(&app);
+                            acks.push(json!({ "jobId": id, "result": { "ok": true, "ended": true } }));
+                        } else {
+                            let u = payload.get("url").and_then(|v| v.as_str()).unwrap_or("");
+                            if u.is_empty() {
+                                acks.push(json!({ "jobId": id, "error": "url de la séance manquante" }));
+                            } else {
+                                let full = if u.starts_with("http") { u.to_string() } else { format!("{}{}", server.trim_end_matches('/'), u) };
+                                match open_locked(&app, &full) {
+                                    Ok(_) => acks.push(json!({ "jobId": id, "result": { "ok": true } })),
+                                    Err(e) => acks.push(json!({ "jobId": id, "error": e })),
+                                }
+                            }
                         }
                     }
                     "affichage" => {
