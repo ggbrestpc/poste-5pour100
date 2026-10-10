@@ -54,7 +54,14 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Signature (facultatif, recommandé pour la production) :
+          # Mise à jour automatique (clé « updater » minisign, distincte de la signature OS).
+          # Ces variables restent vides tant que les secrets ne sont pas définis : sans
+          # « createUpdaterArtifacts » dans tauri.conf.json, elles n'ont aucun effet et le build
+          # réussit. Dès que vous ajoutez le secret TAURI_SIGNING_PRIVATE_KEY ET activez
+          # createUpdaterArtifacts, les artefacts de mise à jour sont signés automatiquement.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # Signature OS (facultatif, après validation complète / mise en vente officielle) :
           # macOS : APPLE_CERTIFICATE, APPLE_CERTIFICATE_PASSWORD, APPLE_SIGNING_IDENTITY, APPLE_ID, APPLE_PASSWORD, APPLE_TEAM_ID
           # Windows : configurer un certificat de signature de code.
         with:

@@ -15,7 +15,7 @@ fenêtre qui affiche en direct l'état de connexion, la dernière activité et l
 
 1. Dans l'espace : **Agent de bureau → Appairer un poste** → un **code** (valable 15 min).
 2. Dans l'agent : coller le code → il appelle `POST /api/agent/pair`, reçoit un **jeton** (stocké
-   localement, jamais renvoyé) et se connecte.
+   dans le **coffre d'identifiants du système**, jamais renvoyé) et se connecte.
 3. En fond, toutes les 5 s : `POST /api/agent/sync` (jeton `Bearer`) → récupère les tâches, les
    exécute, et les acquitte au cycle suivant. Révoquer le poste depuis l'espace coupe le jeton.
 
@@ -115,6 +115,60 @@ Chaque type de tâche se branche dans `main.rs`, dans le `match kind { … }` de
   système bas niveau).
 
 Chaque tâche est **acquittée** au serveur (succès ou erreur), et rejouée en cas de coupure réseau.
+Les tâches déjà exécutées sont mémorisées (`processed.json`) : si un acquittement se perd et que le
+serveur renvoie la tâche, elle est **ré-acquittée sans être rejouée** (idempotence).
+
+## Sécurité de l'agent
+
+L'agent applique plusieurs protections (durcissement « P0/P1 ») :
+
+- **Jeton dans le coffre système** : le jeton d'appairage est conservé dans le gestionnaire
+  d'identifiants de l'OS (Windows Credential Manager, Trousseau macOS, Secret Service Linux), pas en
+  clair dans un fichier. Un ancien jeton présent dans `config.json` est migré vers le coffre puis retiré
+  du fichier au démarrage suivant.
+- **Ouverture de fichiers filtrée** : les fichiers reçus ne sont ouverts qu'avec l'application par
+  défaut via la bibliothèque `opener` (aucune commande shell n'est construite). Les types
+  **exécutables/scripts/raccourcis** (`.exe`, `.bat`, `.cmd`, `.msi`, `.js`, `.vbs`, `.ps1`, `.jar`,
+  `.sh`, `.lnk`, `.dll`, `.app`, `.dmg`, `.pkg`, `.deb`, `.apk`, `.iso`, `.reg`, …) et les fichiers
+  **sans extension** sont **refusés** : le fichier est supprimé et la tâche renvoie une erreur.
+- **URL filtrées** : seules les URL `http://`/`https://` sont ouvertes (dans le navigateur par défaut) ;
+  les autres schémas (`file:`, `javascript:`, …) sont ignorés.
+- **CSP stricte** : l'interface embarquée n'autorise que ses propres ressources
+  (`script-src 'self'`) ; aucun script distant ne peut s'exécuter.
+- **Idempotence** : voir ci-dessus — pas de double exécution si un acquittement est perdu.
+
+## Mises à jour automatiques (Tauri Updater)
+
+L'agent **vérifie et installe silencieusement** une mise à jour au démarrage, puis se relance. Le
+mécanisme est **inactif tant qu'une clé de mise à jour n'est pas configurée** (`check()` échoue alors
+sans conséquence) — c'est volontaire : la CI compile sans clé. Cette clé « updater » (minisign) est
+**distincte de la signature OS** (Apple/Windows) et ne coûte rien.
+
+Pour **activer** les mises à jour auto :
+
+1. **Générer une paire de clés** (une seule fois, à conserver précieusement) :
+   ```bash
+   npx @tauri-apps/cli@^2 signer generate -w ~/.tauri/poste-5pour100.key
+   ```
+   Cela crée la clé privée (`~/.tauri/poste-5pour100.key`) et la clé publique (`…​.key.pub`).
+2. **Clé publique** → la coller dans `src-tauri/tauri.conf.json`, champ `plugins.updater.pubkey`
+   (actuellement vide).
+3. **Clé privée** → l'ajouter en **secret GitHub** du dépôt :
+   `Settings → Secrets and variables → Actions` :
+   - `TAURI_SIGNING_PRIVATE_KEY` = contenu du fichier `.key`
+   - `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` = le mot de passe choisi (laisser vide s'il n'y en a pas)
+4. **Activer la production des artefacts de mise à jour** : dans `src-tauri/tauri.conf.json`, ajouter
+   sous `bundle` :
+   ```json
+   "createUpdaterArtifacts": true
+   ```
+   ⚠️ Ne l'activez **qu'après** avoir ajouté le secret `TAURI_SIGNING_PRIVATE_KEY` : sinon le build CI
+   échoue (clé de signature manquante). Le workflow transmet déjà ces variables d'environnement ; elles
+   restent sans effet tant que `createUpdaterArtifacts` n'est pas activé.
+
+Ensuite, chaque release publiée par la CI contient les artefacts signés et un fichier `latest.json` ;
+les agents installés se mettent à jour seuls vers la dernière version. L'endpoint interrogé est
+`https://github.com/ggbrestpc/poste-5pour100/releases/latest/download/latest.json`.
 
 En plus des tâches, à chaque cycle l'agent interroge **`/api/agent/classe/shares`** : les **supports des
 partages de classe ouverts** sont téléchargés automatiquement (une seule fois chacun) dans le dossier des
@@ -128,4 +182,5 @@ problème.) La barre des tâches offre une **sortie de secours « Fermer la séa
 verrouillée reste bloquée.
 
 Pistes suivantes : impression **ESC/POS** fine (tickets 58/80 mm) via une liaison directe à
-l'imprimante, et **mises à jour automatiques** (Tauri Updater) pour que l'agent se mette à jour seul.
+l'imprimante, et **signature OS** (Apple/Windows) pour supprimer les avertissements « éditeur inconnu »
+à l'installation — prévue après validation complète et mise en vente officielle.

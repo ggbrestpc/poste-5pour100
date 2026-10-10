@@ -1,6 +1,6 @@
 [package]
 name = "poste-5pour100"
-version = "0.2.1"
+version = "0.3.0"
 edition = "2021"
 description = "Agent de bureau Poste 5pour100"
 authors = ["5pour100"]
@@ -20,6 +20,13 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 tokio = { version = "1", features = ["rt-multi-thread", "time", "sync", "macros"] }
 base64 = "0.22"
 url = "2"
+# Stockage sécurisé du jeton : Windows Credential Manager, Keychain macOS, Secret Service Linux.
+keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
+# Ouverture sûre de fichiers/URL (évite la construction de commandes shell).
+opener = "0.7"
+# Mises à jour automatiques (signées par une clé « updater » minisign, distincte de la signature OS).
+tauri-plugin-updater = "2"
+tauri-plugin-process = "2"
 
 [profile.release]
 strip = true

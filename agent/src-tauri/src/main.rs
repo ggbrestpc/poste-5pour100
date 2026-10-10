@@ -10,6 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use base64::Engine;
+use keyring::Entry;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder, WindowEvent};
@@ -17,6 +18,7 @@ use tauri::menu::{Menu, MenuItem};
 use tauri::tray::TrayIconBuilder;
 use tauri_plugin_autostart::ManagerExt;
 use tauri_plugin_notification::NotificationExt;
+use tauri_plugin_updater::UpdaterExt;
 use tokio::sync::Mutex;
 
 const DEFAULT_SERVER: &str = "https://my.5pour100.fr";
@@ -103,25 +105,34 @@ async fn fetch_payload_file(
     None
 }
 
-/// Ouvre un fichier avec l'application par défaut du système.
-fn open_path(path: &Path) {
-    let p = path.to_string_lossy().to_string();
-    #[cfg(target_os = "windows")]
-    let _ = Command::new("cmd").args(["/C", "start", "", &p]).spawn();
-    #[cfg(target_os = "macos")]
-    let _ = Command::new("open").arg(&p).spawn();
-    #[cfg(target_os = "linux")]
-    let _ = Command::new("xdg-open").arg(&p).spawn();
+/// Extensions de fichiers refusées (exécutables, scripts, raccourcis) : on n'ouvre jamais ces types,
+/// même reçus du serveur. Un fichier sans extension n'est pas ouvert automatiquement non plus.
+const BLOCKED_EXT: &[&str] = &[
+    "exe", "bat", "cmd", "com", "scr", "msi", "msix", "js", "jse", "vbs", "vbe", "ps1", "psm1", "jar",
+    "sh", "bash", "lnk", "dll", "cpl", "hta", "wsf", "wsh", "reg", "app", "dmg", "pkg", "deb", "apk",
+    "gadget", "iso", "scf", "inf",
+];
+fn ext_allowed(path: &Path) -> bool {
+    match path.extension().and_then(|e| e.to_str()) {
+        Some(e) => !BLOCKED_EXT.contains(&e.to_lowercase().as_str()),
+        None => false,
+    }
 }
 
-/// Ouvre une URL dans le navigateur par défaut.
+/// Ouvre un fichier avec l'application par défaut, via `opener` (pas de construction de commande shell).
+/// Refuse les types dangereux. Renvoie false si le fichier n'a pas été ouvert.
+fn open_path(path: &Path) -> bool {
+    if !path.is_dir() && !ext_allowed(path) {
+        return false;
+    }
+    opener::open(path).is_ok()
+}
+
+/// Ouvre une URL http(s) dans le navigateur par défaut. Les autres schémas sont refusés.
 fn open_url(url: &str) {
-    #[cfg(target_os = "windows")]
-    let _ = Command::new("cmd").args(["/C", "start", "", url]).spawn();
-    #[cfg(target_os = "macos")]
-    let _ = Command::new("open").arg(url).spawn();
-    #[cfg(target_os = "linux")]
-    let _ = Command::new("xdg-open").arg(url).spawn();
+    if url.starts_with("https://") || url.starts_with("http://") {
+        let _ = opener::open_browser(url);
+    }
 }
 
 /// Impression : tente une impression directe, sinon ouvre le fichier pour impression manuelle.
@@ -157,16 +168,67 @@ fn config_path(app: &AppHandle) -> std::path::PathBuf {
     dir.join("config.json")
 }
 
-fn load_config(app: &AppHandle) -> Config {
-    match std::fs::read_to_string(config_path(app)) {
-        Ok(s) => serde_json::from_str(&s).unwrap_or_default(),
-        Err(_) => Config::default(),
+/* --- Jeton stocké dans le coffre d'identifiants du système (DPAPI/Keychain/Secret Service) --- */
+fn token_entry() -> Option<Entry> {
+    Entry::new("fr.cinqpourcent.poste", "device-token").ok()
+}
+fn keyring_get() -> Option<String> {
+    token_entry().and_then(|e| e.get_password().ok()).filter(|s| !s.is_empty())
+}
+/// Écrit (ou efface) le jeton dans le coffre. Renvoie true si le coffre a accepté l'opération.
+fn keyring_set(tok: Option<&str>) -> bool {
+    match token_entry() {
+        Some(e) => match tok {
+            Some(t) => e.set_password(t).is_ok(),
+            None => {
+                let _ = e.delete_credential();
+                true
+            }
+        },
+        None => false,
     }
 }
 
+fn load_config(app: &AppHandle) -> Config {
+    let mut c = match std::fs::read_to_string(config_path(app)) {
+        Ok(s) => serde_json::from_str::<Config>(&s).unwrap_or_default(),
+        Err(_) => Config::default(),
+    };
+    // Priorité au coffre système ; sinon migre un éventuel jeton hérité du fichier vers le coffre.
+    if let Some(t) = keyring_get() {
+        c.token = Some(t);
+    } else if c.token.is_some() {
+        let _ = keyring_set(c.token.as_deref());
+    }
+    c
+}
+
 fn save_config(app: &AppHandle, c: &Config) -> Result<(), String> {
-    let s = serde_json::to_string_pretty(c).map_err(|e| e.to_string())?;
+    // Le jeton va dans le coffre système. S'il l'accepte, on ne l'écrit PAS en clair dans le fichier.
+    let secured = keyring_set(c.token.as_deref());
+    let mut to_write = c.clone();
+    if secured {
+        to_write.token = None;
+    }
+    let s = serde_json::to_string_pretty(&to_write).map_err(|e| e.to_string())?;
     std::fs::write(config_path(app), s).map_err(|e| e.to_string())
+}
+
+fn processed_path(app: &AppHandle) -> std::path::PathBuf {
+    let dir = app.path().app_config_dir().unwrap_or_else(|_| std::env::temp_dir());
+    let _ = std::fs::create_dir_all(&dir);
+    dir.join("processed.json")
+}
+fn load_processed(app: &AppHandle) -> Vec<String> {
+    std::fs::read_to_string(processed_path(app))
+        .ok()
+        .and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok())
+        .unwrap_or_default()
+}
+fn save_processed(app: &AppHandle, list: &[String]) {
+    if let Ok(s) = serde_json::to_string(list) {
+        let _ = std::fs::write(processed_path(app), s);
+    }
 }
 
 fn trim_url(u: &str) -> String {
@@ -344,6 +406,8 @@ async fn sync_loop(app: AppHandle, state: Arc<Mutex<Vec<serde_json::Value>>>) {
     let mut jobs_total: u64 = 0;
     // Supports de classe déjà téléchargés (évite de les reprendre à chaque cycle).
     let mut classe_seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // Tâches déjà exécutées (idempotence), persistées entre les redémarrages.
+    let mut processed: Vec<String> = load_processed(&app);
     loop {
         ticker.tick().await;
         let c = load_config(&app);
@@ -396,6 +460,13 @@ async fn sync_loop(app: AppHandle, state: Arc<Mutex<Vec<serde_json::Value>>>) {
                 if id.is_empty() {
                     continue;
                 }
+                // Idempotence : si la tâche a déjà été exécutée (ack perdu, renvoi par le serveur),
+                // on ne la rejoue pas — on se contente de la ré-acquitter.
+                if processed.iter().any(|x| x == &id) {
+                    acks.push(json!({ "jobId": id, "result": { "ok": true, "idempotent": true } }));
+                    continue;
+                }
+                let id_done = id.clone();
                 let kind = job.get("kind").and_then(|v| v.as_str()).unwrap_or("");
                 let payload = job.get("payload").cloned().unwrap_or(json!({}));
                 jobs_total += 1;
@@ -430,9 +501,13 @@ async fn sync_loop(app: AppHandle, state: Arc<Mutex<Vec<serde_json::Value>>>) {
                     "partage_fichier" => {
                         match fetch_payload_file(&client, &payload, &token, &server, "fichier").await {
                             Some(path) => {
-                                open_path(&path);
-                                let _ = app.notification().builder().title("5pour100 — fichier").body("Fichier reçu et ouvert.").show();
-                                acks.push(json!({ "jobId": id, "result": { "ok": true, "path": path.to_string_lossy() } }));
+                                if open_path(&path) {
+                                    let _ = app.notification().builder().title("5pour100 — fichier").body("Fichier reçu et ouvert.").show();
+                                    acks.push(json!({ "jobId": id, "result": { "ok": true, "path": path.to_string_lossy() } }));
+                                } else {
+                                    let _ = std::fs::remove_file(&path);
+                                    acks.push(json!({ "jobId": id, "error": "type de fichier non autorisé (refusé par l'agent)" }));
+                                }
                             }
                             None => acks.push(json!({ "jobId": id, "error": "fichier introuvable" })),
                         }
@@ -480,6 +555,12 @@ async fn sync_loop(app: AppHandle, state: Arc<Mutex<Vec<serde_json::Value>>>) {
                         acks.push(json!({ "jobId": id, "error": format!("type « {other} » non pris en charge par cette version de l'agent") }));
                     }
                 }
+                // Tâche traitée : on la mémorise pour ne pas la rejouer si le serveur la renvoie.
+                processed.push(id_done);
+                if processed.len() > 1000 {
+                    processed.remove(0);
+                }
+                save_processed(&app, &processed);
             }
             if !acks.is_empty() {
                 let mut guard = state.lock().await;
@@ -516,13 +597,16 @@ async fn sync_loop(app: AppHandle, state: Arc<Mutex<Vec<serde_json::Value>>>) {
                                 if let Ok(fb) = r.json::<serde_json::Value>().await {
                                     // fetch_payload_file décode le champ dataBase64 vers le dossier des fichiers reçus.
                                     if let Some(path) = fetch_payload_file(&client, &fb, &token, &server, "support").await {
-                                        open_path(&path);
-                                        let _ = app
-                                            .notification()
-                                            .builder()
-                                            .title("5pour100 — support de classe")
-                                            .body("Nouveau support reçu et ouvert.")
-                                            .show();
+                                        if open_path(&path) {
+                                            let _ = app
+                                                .notification()
+                                                .builder()
+                                                .title("5pour100 — support de classe")
+                                                .body("Nouveau support reçu et ouvert.")
+                                                .show();
+                                        } else {
+                                            let _ = std::fs::remove_file(&path);
+                                        }
                                         classe_seen.insert(fid);
                                         last_action = "Support de classe reçu".to_string();
                                     }
@@ -538,6 +622,26 @@ async fn sync_loop(app: AppHandle, state: Arc<Mutex<Vec<serde_json::Value>>>) {
     }
 }
 
+/// Vérifie et installe une mise à jour si disponible, puis relance l'agent. Silencieux et tolérant :
+/// toute erreur (pas de clé updater, hors ligne, aucune release) est ignorée.
+async fn check_update(app: AppHandle) {
+    let updater = match app.updater() {
+        Ok(u) => u,
+        Err(_) => return,
+    };
+    if let Ok(Some(update)) = updater.check().await {
+        let _ = app
+            .notification()
+            .builder()
+            .title("Poste 5pour100")
+            .body("Mise à jour en cours d'installation…")
+            .show();
+        if update.download_and_install(|_, _| {}, || {}).await.is_ok() {
+            app.restart();
+        }
+    }
+}
+
 fn main() {
     tauri::Builder::default()
         // Une seule instance : relancer l'agent ramène la fenêtre existante au premier plan.
@@ -549,6 +653,8 @@ fn main() {
             }
         }))
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             None,
@@ -605,6 +711,13 @@ fn main() {
             let acks = state.acks.clone();
             tauri::async_runtime::spawn(async move {
                 sync_loop(handle, acks).await;
+            });
+
+            // Mise à jour automatique au démarrage (silencieuse). Inactive tant que la clé « updater »
+            // (plugins.updater.pubkey) n'est pas renseignée : check() échoue alors et on ne fait rien.
+            let up = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                check_update(up).await;
             });
             Ok(())
         })
