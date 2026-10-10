@@ -1,6 +1,6 @@
 [package]
 name = "poste-5pour100"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 description = "Agent de bureau Poste 5pour100"
 authors = ["5pour100"]

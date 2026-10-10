@@ -210,28 +210,17 @@ fn open_display(app: AppHandle) {
     open_url(&url);
 }
 
-/// Ouvre l'espace 5pour100 complet dans une fenêtre native de l'agent : assistant (Léa), gestion,
-/// quiz des élèves, etc. L'utilisateur s'y connecte avec son compte ; la session persiste.
+/// Ouvre l'espace 5pour100 complet (assistant Léa, gestion, quiz des élèves…) dans le navigateur
+/// par défaut. On évite une webview intégrée (page blanche / fenêtre non fermable sous Windows) :
+/// le navigateur est fiable et toujours fermable, et la session de l'utilisateur y persiste.
 /// `path` facultatif (ex. "/apprendre/...") pour ouvrir directement une page.
 #[tauri::command]
-fn open_space(app: AppHandle, path: Option<String>) -> Result<(), String> {
+fn open_space(app: AppHandle, path: Option<String>) {
     let c = load_config(&app);
     let base = c.server_url.trim_end_matches('/').to_string();
     let p = path.unwrap_or_default();
     let p = if p.starts_with('/') { p } else { String::new() };
-    let full = format!("{base}{p}");
-    if let Some(w) = app.get_webview_window("espace") {
-        let _ = w.show();
-        let _ = w.set_focus();
-        return Ok(());
-    }
-    let url = url::Url::parse(&full).map_err(|e| format!("Adresse invalide : {e}"))?;
-    WebviewWindowBuilder::new(&app, "espace", WebviewUrl::External(url))
-        .title("Mon espace 5pour100")
-        .inner_size(1200.0, 820.0)
-        .build()
-        .map_err(|e| e.to_string())?;
-    Ok(())
+    open_url(&format!("{base}{p}"));
 }
 
 #[tauri::command]
@@ -577,10 +566,11 @@ fn main() {
             open_space
         ])
         .setup(|app| {
-            // Icône de barre des tâches : afficher / quitter.
+            // Icône de barre des tâches : afficher / fermer une séance guidée / quitter.
             let show = MenuItem::with_id(app, "show", "Ouvrir", true, None::<&str>)?;
+            let endseance = MenuItem::with_id(app, "endseance", "Fermer la séance guidée", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "Quitter", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&show, &quit])?;
+            let menu = Menu::with_items(app, &[&show, &endseance, &quit])?;
             let _tray = TrayIconBuilder::new()
                 .icon(app.default_window_icon().unwrap().clone())
                 .menu(&menu)
@@ -592,6 +582,8 @@ fn main() {
                             let _ = w.set_focus();
                         }
                     }
+                    // Sortie de secours locale : ferme une séance guidée restée bloquée (contenu non chargé).
+                    "endseance" => close_locked(app),
                     "quit" => app.exit(0),
                     _ => {}
                 })

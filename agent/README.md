@@ -121,10 +121,11 @@ partages de classe ouverts** sont téléchargés automatiquement (une seule fois
 fichiers reçus, puis ouverts. Le bouton **« Afficher l'écran d'état »** de la fenêtre ouvre `/<serveur>/ecran`
 sur l'écran du poste (mettre le navigateur en plein écran avec F11 pour une TV).
 
-Le bouton **« Ouvrir mon espace »** ouvre l'**espace 5pour100 complet dans une fenêtre native** de l'agent
-(assistant Léa, gestion, quiz des élèves, etc.) : l'utilisateur s'y connecte avec son compte et la session
-persiste. L'agent devient ainsi une véritable application de bureau de toute la plateforme, pas seulement un
-exécuteur de tâches en arrière-plan.
+Le bouton **« Ouvrir mon espace »** ouvre l'**espace 5pour100 complet** (assistant Léa, gestion, quiz des
+élèves, etc.) dans le **navigateur par défaut** : fiable et toujours fermable, la session de l'utilisateur
+y persiste. (Une webview intégrée restait blanche et non fermable sous Windows ; le navigateur évite ce
+problème.) La barre des tâches offre une **sortie de secours « Fermer la séance guidée »** si une séance
+verrouillée reste bloquée.
 
 Pistes suivantes : impression **ESC/POS** fine (tickets 58/80 mm) via une liaison directe à
 l'imprimante, et **mises à jour automatiques** (Tauri Updater) pour que l'agent se mette à jour seul.
