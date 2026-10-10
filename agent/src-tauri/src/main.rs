@@ -12,7 +12,7 @@ use std::time::Duration;
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use tauri::{AppHandle, Emitter, Manager, State, WindowEvent};
+use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::TrayIconBuilder;
 use tauri_plugin_autostart::ManagerExt;
@@ -208,6 +208,30 @@ fn open_display(app: AppHandle) {
     let c = load_config(&app);
     let url = format!("{}/ecran", c.server_url.trim_end_matches('/'));
     open_url(&url);
+}
+
+/// Ouvre l'espace 5pour100 complet dans une fenêtre native de l'agent : assistant (Léa), gestion,
+/// quiz des élèves, etc. L'utilisateur s'y connecte avec son compte ; la session persiste.
+/// `path` facultatif (ex. "/apprendre/...") pour ouvrir directement une page.
+#[tauri::command]
+fn open_space(app: AppHandle, path: Option<String>) -> Result<(), String> {
+    let c = load_config(&app);
+    let base = c.server_url.trim_end_matches('/').to_string();
+    let p = path.unwrap_or_default();
+    let p = if p.starts_with('/') { p } else { String::new() };
+    let full = format!("{base}{p}");
+    if let Some(w) = app.get_webview_window("espace") {
+        let _ = w.show();
+        let _ = w.set_focus();
+        return Ok(());
+    }
+    let url = url::Url::parse(&full).map_err(|e| format!("Adresse invalide : {e}"))?;
+    WebviewWindowBuilder::new(&app, "espace", WebviewUrl::External(url))
+        .title("Mon espace 5pour100")
+        .inner_size(1200.0, 820.0)
+        .build()
+        .map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -480,7 +504,8 @@ fn main() {
             get_autostart,
             set_autostart,
             open_received_folder,
-            open_display
+            open_display,
+            open_space
         ])
         .setup(|app| {
             // Icône de barre des tâches : afficher / quitter.

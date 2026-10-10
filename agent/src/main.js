@@ -99,6 +99,11 @@ window.addEventListener("DOMContentLoaded", () => {
   $("autostart").addEventListener("change", toggleAutostart);
   $("folder-btn").addEventListener("click", () => invoke("open_received_folder"));
   $("display-btn").addEventListener("click", () => invoke("open_display"));
+  $("space-btn").addEventListener("click", () => invoke("open_space", {}).catch((e) => {
+    const m = $("conn-msg");
+    m.textContent = "Impossible d'ouvrir l'espace : " + String(e);
+    m.className = "msg err";
+  }));
   $("code").addEventListener("keydown", (e) => {
     if (e.key === "Enter") doPair();
   });
