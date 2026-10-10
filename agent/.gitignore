@@ -1,0 +1,5 @@
+# Artefacts de compilation Rust/Tauri
+src-tauri/target/
+src-tauri/gen/
+# Icônes générées par `tauri icon` (produites à la compilation depuis logo.png)
+src-tauri/icons/

@@ -1,0 +1,24 @@
+Copyright (c) 2026 5pour100. Tous droits réservés. / All rights reserved.
+
+Ce code source est publié à des fins de transparence et de compilation des installeurs
+de l'agent de bureau « Poste 5pour100 ». Il ne s'agit PAS d'un logiciel libre.
+
+Sont interdits, sans autorisation écrite préalable de 5pour100 :
+- la réutilisation, la copie ou l'intégration de tout ou partie de ce code dans un autre projet ;
+- la redistribution, la revente ou la mise à disposition de versions modifiées ;
+- toute utilisation de la marque, du nom ou du logo « 5pour100 ».
+
+Est autorisé : consulter le code, le compiler localement et exécuter l'agent pour se connecter à
+un espace 5pour100 légitime.
+
+LE LOGICIEL EST FOURNI « EN L'ÉTAT », SANS GARANTIE D'AUCUNE SORTE.
+
+---
+
+Copyright (c) 2026 5pour100. All rights reserved.
+
+This source code is published for transparency and to build the "Poste 5pour100" desktop agent
+installers. It is NOT open-source software. Reuse, copying, redistribution of modified versions, or
+use of the "5pour100" name, brand or logo is prohibited without prior written permission. You may
+read the code, build it locally, and run the agent to connect to a legitimate 5pour100 workspace.
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND.

@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Poste 5pour100</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main class="wrap">
+      <header class="brand">
+        <div class="logo">5</div>
+        <div>
+          <div class="brand-name">Poste 5pour100</div>
+          <div class="brand-sub">Agent de bureau</div>
+        </div>
+      </header>
+
+      <!-- Non appairé -->
+      <section id="pair-view" class="card hidden">
+        <h1>Relier cet ordinateur</h1>
+        <p class="muted">Dans votre espace 5pour100 : <strong>Agent de bureau → Appairer un poste</strong>, puis saisissez le code ci-dessous.</p>
+        <label>Code d'appairage
+          <input id="code" type="text" maxlength="12" autocomplete="off" placeholder="XXXXXXXX" />
+        </label>
+        <label>Nom du poste (optionnel)
+          <input id="name" type="text" maxlength="80" placeholder="Accueil, Salle A…" />
+        </label>
+        <details>
+          <summary>Adresse du serveur</summary>
+          <input id="server" type="text" placeholder="https://my.5pour100.fr" />
+        </details>
+        <button id="pair-btn" class="btn">Connecter</button>
+        <p id="pair-msg" class="msg"></p>
+      </section>
+
+      <!-- Appairé -->
+      <section id="connected-view" class="card hidden">
+        <div id="status-chip" class="status"><span class="dot"></span> <span id="status-text">Connecté</span></div>
+        <h1 id="device-name">Ce poste</h1>
+        <p class="muted" id="server-label"></p>
+
+        <div class="activity">
+          <div class="activity-row">
+            <span class="activity-label">Dernière activité</span>
+            <span id="last-action" class="activity-value">À l'écoute</span>
+          </div>
+          <div class="activity-row">
+            <span class="activity-label">Dernière synchro</span>
+            <span id="last-sync" class="activity-value">—</span>
+          </div>
+          <div class="activity-row">
+            <span class="activity-label">Tâches traitées</span>
+            <span id="jobs-total" class="activity-value">0</span>
+          </div>
+        </div>
+
+        <label class="switch">
+          <input id="autostart" type="checkbox" />
+          <span>Démarrer automatiquement avec l'ordinateur</span>
+        </label>
+
+        <p class="muted">L'agent reçoit automatiquement les tâches de votre espace (notifications, impressions, fichiers…), même après une coupure réseau passagère. Vous pouvez fermer cette fenêtre : il continue en arrière-plan (barre des tâches).</p>
+
+        <div class="row">
+          <button id="folder-btn" class="btn ghost">Ouvrir le dossier des fichiers reçus</button>
+          <button id="unpair-btn" class="btn ghost">Déconnecter ce poste</button>
+        </div>
+        <p id="conn-msg" class="msg"></p>
+      </section>
+
+      <footer class="foot">
+        <span class="foot-logo">5</span>
+        <span>5pour100 · Hébergé en France · Vos données restent chez vous</span>
+      </footer>
+    </main>
+    <script src="main.js"></script>
+  </body>
+</html>

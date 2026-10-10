@@ -1,0 +1,67 @@
+name: Agent de bureau — installeurs
+
+# Déclenché par un tag « agent-v* » (ex. agent-v0.1.0) ou manuellement.
+on:
+  push:
+    tags:
+      - "agent-v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-latest      # produit un .dmg (Intel + Apple Silicon selon le runner)
+            args: "--target universal-apple-darwin"
+          - platform: ubuntu-22.04      # produit .AppImage et .deb
+            args: ""
+          - platform: windows-latest    # produit .msi et .exe (NSIS)
+            args: ""
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Node (pour la génération des icônes)
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+
+      - name: Cache cargo
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: agent/src-tauri -> target
+
+      - name: Dépendances Linux (WebKitGTK, tray, AppImage)
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev libgtk-3-dev build-essential
+
+      - name: Générer les icônes depuis logo.png
+        run: npx --yes @tauri-apps/cli@^2 icon agent/logo.png --output agent/src-tauri/icons
+
+      - name: Compiler et publier
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Signature (facultatif, recommandé pour la production) :
+          # macOS : APPLE_CERTIFICATE, APPLE_CERTIFICATE_PASSWORD, APPLE_SIGNING_IDENTITY, APPLE_ID, APPLE_PASSWORD, APPLE_TEAM_ID
+          # Windows : configurer un certificat de signature de code.
+        with:
+          projectPath: agent
+          tagName: ${{ github.ref_type == 'tag' && github.ref_name || format('agent-v{0}', github.run_number) }}
+          releaseName: "Agent Poste 5pour100 ${{ github.ref_type == 'tag' && github.ref_name || github.run_number }}"
+          releaseBody: "Installeurs de l'agent de bureau. Après installation, saisissez le code d'appairage depuis votre espace (Agent de bureau → Appairer un poste)."
+          releaseDraft: true
+          prerelease: false
+          args: ${{ matrix.args }}
