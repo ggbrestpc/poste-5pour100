@@ -290,7 +290,7 @@ async fn pair(app: AppHandle, code: String, server_url: String, name: String) ->
 /// Ouvre une fenêtre « séance guidée » verrouillée : plein écran, toujours au premier plan, non
 /// fermable (l'élève ne peut que suivre le contenu poussé par le formateur). Le verrouillage est au
 /// mieux : il empêche de fermer/réduire la fenêtre, pas les raccourcis système bas niveau (Alt+Tab…).
-fn open_locked(app: &AppHandle, url: &str) -> Result<(), String> {
+fn open_locked(app: &AppHandle, url: &str, notes: bool) -> Result<(), String> {
     if let Some(w) = app.get_webview_window("diffusion") {
         let _ = w.show();
         let _ = w.set_focus();
@@ -311,12 +311,26 @@ fn open_locked(app: &AppHandle, url: &str) -> Result<(), String> {
             let _ = wc.set_focus();
         }
     });
+    // Bandeau de notes : petite fenêtre locale déplaçable et réductible, au-dessus du contenu.
+    if notes && app.get_webview_window("notes").is_none() {
+        let _ = WebviewWindowBuilder::new(app, "notes", WebviewUrl::App("notes.html".into()))
+            .title("Mes notes")
+            .inner_size(360.0, 480.0)
+            .min_inner_size(260.0, 200.0)
+            .always_on_top(true)
+            .resizable(true)
+            .minimizable(true)
+            .build();
+    }
     Ok(())
 }
 
-/// Ferme la séance guidée (fin poussée par le formateur).
+/// Ferme la séance guidée (fin poussée par le formateur) et le bandeau de notes.
 fn close_locked(app: &AppHandle) {
     if let Some(w) = app.get_webview_window("diffusion") {
+        let _ = w.destroy();
+    }
+    if let Some(w) = app.get_webview_window("notes") {
         let _ = w.destroy();
     }
 }
@@ -457,7 +471,8 @@ async fn sync_loop(app: AppHandle, state: Arc<Mutex<Vec<serde_json::Value>>>) {
                                 acks.push(json!({ "jobId": id, "error": "url de la séance manquante" }));
                             } else {
                                 let full = if u.starts_with("http") { u.to_string() } else { format!("{}{}", server.trim_end_matches('/'), u) };
-                                match open_locked(&app, &full) {
+                                let notes = payload.get("notes").and_then(|v| v.as_bool()).unwrap_or(true);
+                                match open_locked(&app, &full, notes) {
                                     Ok(_) => acks.push(json!({ "jobId": id, "result": { "ok": true } })),
                                     Err(e) => acks.push(json!({ "jobId": id, "error": e })),
                                 }

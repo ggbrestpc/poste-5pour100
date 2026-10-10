@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Mes notes</title>
+    <style>
+      :root { --bg:#0b1220; --card:#141c2e; --line:#273349; --text:#eef2fb; --muted:#9aa7bd; --accent:#3b82f6; }
+      * { box-sizing: border-box; }
+      html, body { height: 100%; margin: 0; }
+      body { display: flex; flex-direction: column; background: var(--bg); color: var(--text);
+        font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+      header { display: flex; align-items: center; gap: 8px; padding: 10px 12px; border-bottom: 1px solid var(--line); }
+      .logo { width: 24px; height: 24px; border-radius: 7px; background: linear-gradient(135deg,#3b82f6,#7c6cff);
+        color:#fff; font-weight:800; font-size:13px; display:grid; place-items:center; }
+      .title { font-weight: 700; font-size: .95rem; }
+      textarea { flex: 1; width: 100%; border: 0; resize: none; padding: 12px; background: var(--bg); color: var(--text);
+        font: inherit; line-height: 1.5; outline: none; }
+      footer { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-top: 1px solid var(--line);
+        color: var(--muted); font-size: .78rem; }
+      button { font: inherit; font-size: .82rem; border: 1px solid var(--line); background: transparent; color: var(--text);
+        border-radius: 8px; padding: 5px 10px; cursor: pointer; }
+      button:hover { border-color: var(--accent); }
+      .spacer { flex: 1; }
+      .saved { color: #5fd08a; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <div class="logo">5</div>
+      <div class="title">Mes notes</div>
+    </header>
+    <textarea id="notes" placeholder="Prenez vos notes ici pendant la séance…" autofocus></textarea>
+    <footer>
+      <span id="state" class="saved">Enregistré</span>
+      <span class="spacer"></span>
+      <button id="copy">Copier</button>
+      <button id="clear">Effacer</button>
+    </footer>
+    <script>
+      const KEY = "poste5-notes";
+      const ta = document.getElementById("notes");
+      const state = document.getElementById("state");
+      try { ta.value = localStorage.getItem(KEY) || ""; } catch {}
+      let t;
+      ta.addEventListener("input", () => {
+        state.textContent = "…";
+        state.className = "";
+        clearTimeout(t);
+        t = setTimeout(() => {
+          try { localStorage.setItem(KEY, ta.value); } catch {}
+          state.textContent = "Enregistré";
+          state.className = "saved";
+        }, 400);
+      });
+      document.getElementById("copy").addEventListener("click", async () => {
+        try { await navigator.clipboard.writeText(ta.value); state.textContent = "Copié"; state.className = "saved"; } catch {}
+      });
+      document.getElementById("clear").addEventListener("click", () => {
+        if (confirm("Effacer toutes les notes ?")) { ta.value = ""; try { localStorage.removeItem(KEY); } catch {} ta.focus(); }
+      });
+    </script>
+  </body>
+</html>
