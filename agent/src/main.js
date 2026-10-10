@@ -98,6 +98,7 @@ window.addEventListener("DOMContentLoaded", () => {
   $("unpair-btn").addEventListener("click", doUnpair);
   $("autostart").addEventListener("change", toggleAutostart);
   $("folder-btn").addEventListener("click", () => invoke("open_received_folder"));
+  $("display-btn").addEventListener("click", () => invoke("open_display"));
   $("code").addEventListener("keydown", (e) => {
     if (e.key === "Enter") doPair();
   });

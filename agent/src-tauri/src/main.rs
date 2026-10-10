@@ -201,6 +201,15 @@ fn open_received_folder() {
     open_path(&dir);
 }
 
+/// Ouvre l'écran d'état de l'espace (tableau de bord) dans le navigateur, pour l'afficher sur une TV.
+/// Astuce utilisateur : passer ensuite le navigateur en plein écran (F11).
+#[tauri::command]
+fn open_display(app: AppHandle) {
+    let c = load_config(&app);
+    let url = format!("{}/ecran", c.server_url.trim_end_matches('/'));
+    open_url(&url);
+}
+
 #[tauri::command]
 fn get_status(app: AppHandle) -> Status {
     let c = load_config(&app);
@@ -272,6 +281,8 @@ async fn sync_loop(app: AppHandle, state: Arc<Mutex<Vec<serde_json::Value>>>) {
     let client = reqwest::Client::new();
     let mut ticker = tokio::time::interval(Duration::from_secs(POLL_SECONDS));
     let mut jobs_total: u64 = 0;
+    // Supports de classe déjà téléchargés (évite de les reprendre à chaque cycle).
+    let mut classe_seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     loop {
         ticker.tick().await;
         let c = load_config(&app);
@@ -332,6 +343,7 @@ async fn sync_loop(app: AppHandle, state: Arc<Mutex<Vec<serde_json::Value>>>) {
                     "impression_billet" => "Billet imprimé",
                     "partage_fichier" => "Fichier reçu",
                     "emargement" => "Émargement ouvert",
+                    "affichage" => "Affichage à l'écran",
                     _ => "Tâche reçue",
                 }
                 .to_string();
@@ -374,6 +386,14 @@ async fn sync_loop(app: AppHandle, state: Arc<Mutex<Vec<serde_json::Value>>>) {
                             None => acks.push(json!({ "jobId": id, "error": "url d'émargement manquante" })),
                         }
                     }
+                    "affichage" => {
+                        // Affiche une page en plein écran sur l'écran du poste (TV d'accueil/salle).
+                        // payload.url : adresse interne (/ecran) ou externe. Défaut : écran d'état.
+                        let u = payload.get("url").and_then(|v| v.as_str()).unwrap_or("/ecran");
+                        let full = if u.starts_with("http") { u.to_string() } else { format!("{}{}", server.trim_end_matches('/'), u) };
+                        open_url(&full);
+                        acks.push(json!({ "jobId": id, "result": { "ok": true } }));
+                    }
                     other => {
                         acks.push(json!({ "jobId": id, "error": format!("type « {other} » non pris en charge par cette version de l'agent") }));
                     }
@@ -384,6 +404,54 @@ async fn sync_loop(app: AppHandle, state: Arc<Mutex<Vec<serde_json::Value>>>) {
                 guard.extend(acks);
             }
         }
+
+        // Partage de fichiers en classe : récupère automatiquement les supports des partages ouverts
+        // et les ouvre sur le poste de la salle. Chaque support n'est téléchargé qu'une fois.
+        if let Ok(resp) = client
+            .post(format!("{server}/api/agent/classe/shares"))
+            .bearer_auth(&token)
+            .timeout(Duration::from_secs(20))
+            .send()
+            .await
+        {
+            if let Ok(cb) = resp.json::<serde_json::Value>().await {
+                if let Some(shares) = cb.get("shares").and_then(|v| v.as_array()) {
+                    for share in shares {
+                        let supports = share.get("supports").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+                        for f in &supports {
+                            let fid = f.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                            if fid.is_empty() || classe_seen.contains(&fid) {
+                                continue;
+                            }
+                            let got = client
+                                .post(format!("{server}/api/agent/classe/file"))
+                                .bearer_auth(&token)
+                                .json(&json!({ "fileId": fid }))
+                                .timeout(Duration::from_secs(60))
+                                .send()
+                                .await;
+                            if let Ok(r) = got {
+                                if let Ok(fb) = r.json::<serde_json::Value>().await {
+                                    // fetch_payload_file décode le champ dataBase64 vers le dossier des fichiers reçus.
+                                    if let Some(path) = fetch_payload_file(&client, &fb, &token, &server, "support").await {
+                                        open_path(&path);
+                                        let _ = app
+                                            .notification()
+                                            .builder()
+                                            .title("5pour100 — support de classe")
+                                            .body("Nouveau support reçu et ouvert.")
+                                            .show();
+                                        classe_seen.insert(fid);
+                                        last_action = "Support de classe reçu".to_string();
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         emit_status(&app, true, &last_action, jobs_total);
     }
 }
@@ -411,7 +479,8 @@ fn main() {
             pair,
             get_autostart,
             set_autostart,
-            open_received_folder
+            open_received_folder,
+            open_display
         ])
         .setup(|app| {
             // Icône de barre des tâches : afficher / quitter.

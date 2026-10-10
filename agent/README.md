@@ -107,8 +107,15 @@ Chaque type de tâche se branche dans `main.rs`, dans le `match kind { … }` de
   sinon ouvre le fichier prêt à imprimer.
 - **`partage_fichier`** → récupère le fichier et l'ouvre avec l'application par défaut.
 - **`emargement`** → ouvre la feuille d'émargement (champ `url`) dans le navigateur.
+- **`affichage`** → ouvre une page en plein écran (champ `url`, défaut `/ecran`) sur l'écran du poste —
+  pratique pour une TV d'accueil ou de salle.
 
 Chaque tâche est **acquittée** au serveur (succès ou erreur), et rejouée en cas de coupure réseau.
+
+En plus des tâches, à chaque cycle l'agent interroge **`/api/agent/classe/shares`** : les **supports des
+partages de classe ouverts** sont téléchargés automatiquement (une seule fois chacun) dans le dossier des
+fichiers reçus, puis ouverts. Le bouton **« Afficher l'écran d'état »** de la fenêtre ouvre `/<serveur>/ecran`
+sur l'écran du poste (mettre le navigateur en plein écran avec F11 pour une TV).
 
 Pistes suivantes : impression **ESC/POS** fine (tickets 58/80 mm) via une liaison directe à
 l'imprimante, et **mises à jour automatiques** (Tauri Updater) pour que l'agent se mette à jour seul.
