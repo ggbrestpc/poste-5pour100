@@ -3,6 +3,102 @@ const listen = window.__TAURI__.event.listen;
 
 const $ = (id) => document.getElementById(id);
 
+// ------- Réglages locaux (parole, son, volume) mémorisés sur ce poste -------
+const settings = {
+  speak: localStorage.getItem("poste.speak") === "1",
+  sound: localStorage.getItem("poste.sound") !== "0", // son activé par défaut
+  volume: Number(localStorage.getItem("poste.volume") ?? "70"),
+};
+
+function saveSettings() {
+  localStorage.setItem("poste.speak", settings.speak ? "1" : "0");
+  localStorage.setItem("poste.sound", settings.sound ? "1" : "0");
+  localStorage.setItem("poste.volume", String(settings.volume));
+}
+
+/** Petit son de notification synthétisé (aucun fichier à embarquer). */
+function playBeep() {
+  if (!settings.sound) return;
+  try {
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    const ctx = new Ctx();
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    const vol = Math.max(0, Math.min(1, settings.volume / 100)) * 0.3;
+    osc.type = "sine";
+    osc.frequency.setValueAtTime(880, ctx.currentTime);
+    osc.frequency.setValueAtTime(660, ctx.currentTime + 0.12);
+    gain.gain.setValueAtTime(vol, ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.35);
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.start();
+    osc.stop(ctx.currentTime + 0.36);
+    osc.onended = () => ctx.close();
+  } catch {}
+}
+
+/** Lecture à voix haute (voix française si disponible). */
+function speakText(text) {
+  if (!settings.speak || !text || !("speechSynthesis" in window)) return;
+  try {
+    const u = new SpeechSynthesisUtterance(text);
+    u.lang = "fr-FR";
+    u.volume = Math.max(0, Math.min(1, settings.volume / 100));
+    const fr = speechSynthesis.getVoices().find((v) => v.lang && v.lang.toLowerCase().startsWith("fr"));
+    if (fr) u.voice = fr;
+    speechSynthesis.cancel();
+    speechSynthesis.speak(u);
+  } catch {}
+}
+
+function onNotify(payload) {
+  const title = payload?.title || "5pour100";
+  const body = payload?.body || "";
+  playBeep();
+  speakText(body ? `${title}. ${body}` : title);
+}
+
+function initSettingsUI() {
+  const sp = $("opt-speak");
+  const sd = $("opt-sound");
+  const vol = $("opt-volume");
+  if (sp) {
+    sp.checked = settings.speak;
+    sp.addEventListener("change", () => {
+      settings.speak = sp.checked;
+      saveSettings();
+    });
+  }
+  if (sd) {
+    sd.checked = settings.sound;
+    sd.addEventListener("change", () => {
+      settings.sound = sd.checked;
+      saveSettings();
+      if (sd.checked) playBeep();
+    });
+  }
+  if (vol) {
+    vol.value = String(settings.volume);
+    vol.addEventListener("input", () => {
+      settings.volume = Number(vol.value);
+      saveSettings();
+    });
+  }
+}
+
+async function askLea() {
+  const q = $("lea-q").value.trim();
+  if (!q) return;
+  const out = $("lea-answer");
+  out.textContent = "Léa réfléchit…";
+  try {
+    out.textContent = (await invoke("ask_lea", { question: q })) || "—";
+  } catch (e) {
+    out.textContent = String(e);
+  }
+}
+
 function fmtTime(ms) {
   if (!ms) return "—";
   try {
@@ -99,15 +195,22 @@ window.addEventListener("DOMContentLoaded", () => {
   $("autostart").addEventListener("change", toggleAutostart);
   $("folder-btn").addEventListener("click", () => invoke("open_received_folder"));
   $("display-btn").addEventListener("click", () => invoke("open_display"));
-  $("space-btn").addEventListener("click", () => invoke("open_space", {}).catch((e) => {
+  $("space-btn").addEventListener("click", () => invoke("open_space", { path: "/bureau" }).catch((e) => {
     const m = $("conn-msg");
     m.textContent = "Impossible d'ouvrir l'espace : " + String(e);
     m.className = "msg err";
   }));
+  $("lea-send")?.addEventListener("click", askLea);
+  $("lea-q")?.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") askLea();
+  });
+  initSettingsUI();
   $("code").addEventListener("keydown", (e) => {
     if (e.key === "Enter") doPair();
   });
   // Mises à jour en direct émises par la boucle de synchronisation.
   listen("status", (ev) => applyStatus(ev.payload));
+  // Notifications : son + lecture vocale selon les réglages.
+  listen("notify", (ev) => onNotify(ev.payload));
   refresh();
 });

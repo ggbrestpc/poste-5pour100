@@ -57,9 +57,30 @@
 
         <button id="space-btn" class="btn">Ouvrir mon espace (Léa, gestion, quiz élèves)</button>
 
+        <details class="lea">
+          <summary><strong>Demander à Léa</strong> <span class="muted">(réponses publiques)</span></summary>
+          <p class="muted" id="lea-answer">Posez une question : horaires, services, informations publiques de l'espace. Pour vos données, ouvrez votre espace.</p>
+          <div class="lea-input">
+            <input id="lea-q" type="text" maxlength="2000" placeholder="Votre question…" />
+            <button id="lea-send" class="btn">Demander</button>
+          </div>
+        </details>
+
         <label class="switch">
           <input id="autostart" type="checkbox" />
           <span>Démarrer automatiquement avec l'ordinateur</span>
+        </label>
+        <label class="switch">
+          <input id="opt-speak" type="checkbox" />
+          <span>Lire les notifications à voix haute</span>
+        </label>
+        <label class="switch">
+          <input id="opt-sound" type="checkbox" />
+          <span>Jouer un son à la réception</span>
+        </label>
+        <label class="volume">
+          <span>Volume</span>
+          <input id="opt-volume" type="range" min="0" max="100" step="5" />
         </label>
 
         <p class="muted">L'agent reçoit automatiquement les tâches de votre espace (notifications, impressions, fichiers…), même après une coupure réseau passagère. Vous pouvez fermer cette fenêtre : il continue en arrière-plan (barre des tâches).</p>
