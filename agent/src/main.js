@@ -93,9 +93,56 @@ async function askLea() {
   const out = $("lea-answer");
   out.textContent = "Léa réfléchit…";
   try {
-    out.textContent = (await invoke("ask_lea", { question: q })) || "—";
+    const answer = (await invoke("ask_lea", { question: q })) || "—";
+    out.textContent = answer;
+    speakText(answer); // lecture à voix haute de la réponse (selon le réglage)
   } catch (e) {
     out.textContent = String(e);
+  }
+}
+
+// ------- Dictée au micro (best-effort : dépend du moteur de la webview) -------
+let micRec = null;
+function toggleMic() {
+  const Ctor = window.SpeechRecognition || window.webkitSpeechRecognition;
+  const btn = $("lea-mic");
+  if (!Ctor) {
+    if (btn) {
+      btn.disabled = true;
+      btn.title = "Dictée non disponible sur ce poste";
+    }
+    return;
+  }
+  if (micRec) {
+    micRec.stop();
+    return;
+  }
+  const rec = new Ctor();
+  rec.lang = "fr-FR";
+  rec.interimResults = true;
+  rec.continuous = false;
+  let finalText = "";
+  rec.onresult = (e) => {
+    let interim = "";
+    for (let i = e.resultIndex; i < e.results.length; i++) {
+      const tr = e.results[i][0].transcript;
+      if (e.results[i].isFinal) finalText += tr;
+      else interim += tr;
+    }
+    $("lea-q").value = (finalText + interim).trimStart();
+  };
+  const stop = () => {
+    micRec = null;
+    if (btn) btn.classList.remove("primary");
+  };
+  rec.onend = stop;
+  rec.onerror = stop;
+  micRec = rec;
+  if (btn) btn.classList.add("primary");
+  try {
+    rec.start();
+  } catch {
+    stop();
   }
 }
 
@@ -201,6 +248,7 @@ window.addEventListener("DOMContentLoaded", () => {
     m.className = "msg err";
   }));
   $("lea-send")?.addEventListener("click", askLea);
+  $("lea-mic")?.addEventListener("click", toggleMic);
   $("lea-q")?.addEventListener("keydown", (e) => {
     if (e.key === "Enter") askLea();
   });
