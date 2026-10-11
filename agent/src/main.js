@@ -87,13 +87,75 @@ function initSettingsUI() {
   }
 }
 
+let leaUser = ""; // nom de l'utilisateur connecté sur ce poste, "" si personne
+
+async function refreshLeaAuth() {
+  try {
+    leaUser = (await invoke("lea_me")) || "";
+  } catch {
+    leaUser = "";
+  }
+  const logged = !!leaUser;
+  $("lea-login")?.classList.toggle("hidden", logged);
+  $("lea-account")?.classList.toggle("hidden", !logged);
+  if (logged && $("lea-user")) $("lea-user").textContent = leaUser;
+  if ($("lea-mode")) $("lea-mode").textContent = logged ? "— votre Léa complète" : "(réponses publiques)";
+  if ($("lea-q")) $("lea-q").placeholder = logged ? "Demandez à Léa…" : "Question (infos publiques)…";
+}
+
+async function doLeaLogin() {
+  const email = $("lea-email").value.trim();
+  const password = $("lea-pass").value;
+  const code = $("lea-code").value.trim();
+  const msg = $("lea-login-msg");
+  const btn = $("lea-login-btn");
+  if (!email || !password) {
+    msg.textContent = "E-mail et mot de passe requis.";
+    msg.className = "msg err";
+    return;
+  }
+  btn.disabled = true;
+  msg.textContent = "Connexion…";
+  msg.className = "msg";
+  try {
+    await invoke("lea_login", { email, password, code: code || null });
+    $("lea-pass").value = "";
+    $("lea-code").value = "";
+    $("lea-code").classList.add("hidden");
+    msg.textContent = "";
+    await refreshLeaAuth();
+  } catch (e) {
+    const err = String(e);
+    if (err.includes("2FA_REQUIS")) {
+      $("lea-code").classList.remove("hidden");
+      $("lea-code").focus();
+      msg.textContent = "Entrez votre code de validation (2FA).";
+      msg.className = "msg";
+    } else {
+      msg.textContent = err;
+      msg.className = "msg err";
+    }
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function doLeaLogout() {
+  try {
+    await invoke("lea_logout");
+  } catch {}
+  await refreshLeaAuth();
+}
+
 async function askLea() {
   const q = $("lea-q").value.trim();
   if (!q) return;
   const out = $("lea-answer");
   out.textContent = "Léa réfléchit…";
   try {
-    const answer = (await invoke("ask_lea", { question: q })) || "—";
+    const answer = leaUser
+      ? (await invoke("lea_ask_full", { message: q })) || "—"
+      : (await invoke("ask_lea", { question: q })) || "—";
     out.textContent = answer;
     speakText(answer); // lecture à voix haute de la réponse (selon le réglage)
   } catch (e) {
@@ -252,6 +314,15 @@ window.addEventListener("DOMContentLoaded", () => {
   $("lea-q")?.addEventListener("keydown", (e) => {
     if (e.key === "Enter") askLea();
   });
+  $("lea-login-btn")?.addEventListener("click", doLeaLogin);
+  $("lea-logout-btn")?.addEventListener("click", doLeaLogout);
+  $("lea-pass")?.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") doLeaLogin();
+  });
+  $("lea-code")?.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") doLeaLogin();
+  });
+  refreshLeaAuth();
   initSettingsUI();
   $("code").addEventListener("keydown", (e) => {
     if (e.key === "Enter") doPair();

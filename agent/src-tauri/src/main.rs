@@ -29,11 +29,14 @@ struct Config {
     server_url: String,
     token: Option<String>,
     device_name: Option<String>,
+    /// Nom de l'utilisateur connecté sur ce poste (le jeton de session reste dans le coffre OS).
+    #[serde(default)]
+    user_name: Option<String>,
 }
 
 impl Default for Config {
     fn default() -> Self {
-        Config { server_url: DEFAULT_SERVER.to_string(), token: None, device_name: None }
+        Config { server_url: DEFAULT_SERVER.to_string(), token: None, device_name: None, user_name: None }
     }
 }
 
@@ -175,6 +178,26 @@ fn token_entry() -> Option<Entry> {
 fn keyring_get() -> Option<String> {
     token_entry().and_then(|e| e.get_password().ok()).filter(|s| !s.is_empty())
 }
+
+/// Jeton de session utilisateur (connexion « vraie Léa »), stocké dans le coffre OS comme le jeton du poste.
+fn user_token_entry() -> Option<Entry> {
+    Entry::new("fr.cinqpourcent.poste", "user-token").ok()
+}
+fn user_token_get() -> Option<String> {
+    user_token_entry().and_then(|e| e.get_password().ok()).filter(|s| !s.is_empty())
+}
+fn user_token_set(tok: Option<&str>) {
+    if let Some(e) = user_token_entry() {
+        match tok {
+            Some(t) => {
+                let _ = e.set_password(t);
+            }
+            None => {
+                let _ = e.delete_credential();
+            }
+        }
+    }
+}
 /// Écrit (ou efface) le jeton dans le coffre. Renvoie true si le coffre a accepté l'opération.
 fn keyring_set(tok: Option<&str>) -> bool {
     match token_entry() {
@@ -283,6 +306,105 @@ fn open_space(app: AppHandle, path: Option<String>) {
     let p = path.unwrap_or_default();
     let p = if p.starts_with('/') { p } else { String::new() };
     open_url(&format!("{base}{p}"));
+}
+
+/// Connexion d'un utilisateur sur ce poste pour obtenir la vraie Léa. Stocke le jeton de session.
+/// Renvoie le nom de l'utilisateur. Erreur « 2FA_REQUIS » si un code de validation est attendu.
+#[tauri::command]
+async fn lea_login(app: AppHandle, email: String, password: String, code: Option<String>) -> Result<String, String> {
+    let c = load_config(&app);
+    let device = c.token.ok_or("Poste non relié à un espace.")?;
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("{}/api/agent/login", c.server_url.trim_end_matches('/')))
+        .bearer_auth(&device)
+        .json(&json!({ "email": email.trim(), "password": password, "code": code.unwrap_or_default() }))
+        .timeout(Duration::from_secs(30))
+        .send()
+        .await
+        .map_err(|e| format!("Connexion impossible : {e}"))?;
+    let ok = resp.status().is_success();
+    let data: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    if !ok {
+        if data.get("need2fa").and_then(|v| v.as_bool()).unwrap_or(false) {
+            return Err("2FA_REQUIS".to_string());
+        }
+        return Err(data.get("error").and_then(|v| v.as_str()).unwrap_or("Connexion refusée").to_string());
+    }
+    let tok = data.get("token").and_then(|v| v.as_str()).ok_or("Réponse inattendue du serveur")?.to_string();
+    let name = data.get("userName").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    user_token_set(Some(&tok));
+    let mut cfg = load_config(&app);
+    cfg.user_name = if name.is_empty() { None } else { Some(name.clone()) };
+    let _ = save_config(&app, &cfg);
+    Ok(name)
+}
+
+/// Nom de l'utilisateur connecté sur ce poste, ou chaîne vide si personne.
+#[tauri::command]
+fn lea_me(app: AppHandle) -> String {
+    if user_token_get().is_some() {
+        load_config(&app).user_name.unwrap_or_default()
+    } else {
+        String::new()
+    }
+}
+
+/// Déconnexion de l'utilisateur : invalide la session côté serveur et efface le jeton local.
+#[tauri::command]
+async fn lea_logout(app: AppHandle) {
+    let c = load_config(&app);
+    if let Some(ut) = user_token_get() {
+        let client = reqwest::Client::new();
+        let _ = client
+            .delete(format!("{}/api/agent/lea", c.server_url.trim_end_matches('/')))
+            .bearer_auth(&ut)
+            .timeout(Duration::from_secs(15))
+            .send()
+            .await;
+    }
+    user_token_set(None);
+    let mut cfg = load_config(&app);
+    cfg.user_name = None;
+    let _ = save_config(&app, &cfg);
+}
+
+/// Vraie Léa, avec les droits de l'utilisateur connecté. Les actions sensibles restent à valider
+/// dans l'espace (mentionnées en fin de réponse).
+#[tauri::command]
+async fn lea_ask_full(app: AppHandle, message: String) -> Result<String, String> {
+    let c = load_config(&app);
+    let device = c.token.ok_or("Poste non relié.")?;
+    let user = user_token_get().ok_or("Non connecté. Connectez-vous pour utiliser la vraie Léa.")?;
+    let msg = message.trim().to_string();
+    if msg.is_empty() {
+        return Err("Écrivez un message.".to_string());
+    }
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("{}/api/agent/lea", c.server_url.trim_end_matches('/')))
+        .bearer_auth(&user)
+        .header("x-device-token", &device)
+        .json(&json!({ "message": msg }))
+        .timeout(Duration::from_secs(120))
+        .send()
+        .await
+        .map_err(|e| format!("Connexion impossible : {e}"))?;
+    let ok = resp.status().is_success();
+    let data: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    if !ok {
+        return Err(data.get("error").and_then(|v| v.as_str()).unwrap_or("Erreur").to_string());
+    }
+    let mut out = data.get("reply").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    if let Some(p) = data.get("pending").and_then(|v| v.as_array()) {
+        if !p.is_empty() {
+            out.push_str(&format!("\n\n({} action(s) à valider dans votre espace.)", p.len()));
+        }
+    }
+    if out.trim().is_empty() {
+        out = "—".to_string();
+    }
+    Ok(out)
 }
 
 #[tauri::command]
@@ -699,7 +821,11 @@ fn main() {
             open_received_folder,
             open_display,
             open_space,
-            ask_lea
+            ask_lea,
+            lea_login,
+            lea_me,
+            lea_logout,
+            lea_ask_full
         ])
         .setup(|app| {
             // Icône de barre des tâches : afficher / fermer une séance guidée / quitter.

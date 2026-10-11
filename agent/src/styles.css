@@ -64,6 +64,8 @@ details input { margin-top: 8px; width: 100%; }
 .lea #lea-answer { margin: 8px 0; white-space: pre-wrap; }
 .lea-input { display: flex; gap: 8px; }
 .lea-input input { flex: 1; }
+.lea-login { display: flex; flex-direction: column; gap: 8px; margin: 8px 0; }
+.lea-account { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin: 8px 0; }
 .msg { margin: 0; font-size: .88rem; min-height: 1.1em; }
 .msg.ok { color: var(--ok); }
 .msg.err { color: var(--err); }
