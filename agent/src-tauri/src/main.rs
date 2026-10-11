@@ -291,6 +291,33 @@ fn get_status(app: AppHandle) -> Status {
     Status { paired: c.token.is_some(), server_url: c.server_url, device_name: c.device_name }
 }
 
+/// Pose une question à Léa (lecture seule) depuis le poste. Réponse à partir des connaissances
+/// publiques de l'espace ; authentifiée par le jeton du poste. Aucune donnée privée, aucune action.
+#[tauri::command]
+async fn ask_lea(app: AppHandle, question: String) -> Result<String, String> {
+    let c = load_config(&app);
+    let token = c.token.ok_or("Poste non relié à un espace.")?;
+    let q = question.trim().to_string();
+    if q.is_empty() {
+        return Err("Posez une question.".to_string());
+    }
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("{}/api/agent/assistant", c.server_url.trim_end_matches('/')))
+        .bearer_auth(&token)
+        .json(&json!({ "question": q }))
+        .timeout(Duration::from_secs(60))
+        .send()
+        .await
+        .map_err(|e| format!("Connexion impossible : {e}"))?;
+    let ok = resp.status().is_success();
+    let data: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    if !ok {
+        return Err(data.get("error").and_then(|v| v.as_str()).unwrap_or("Erreur").to_string());
+    }
+    Ok(data.get("answer").and_then(|v| v.as_str()).unwrap_or("").to_string())
+}
+
 #[tauri::command]
 fn set_server(app: AppHandle, url: String) -> Result<(), String> {
     let mut c = load_config(&app);
@@ -485,6 +512,8 @@ async fn sync_loop(app: AppHandle, state: Arc<Mutex<Vec<serde_json::Value>>>) {
                         let title = payload.get("title").and_then(|v| v.as_str()).unwrap_or("5pour100");
                         let bodytxt = payload.get("body").and_then(|v| v.as_str()).unwrap_or("");
                         let _ = app.notification().builder().title(title).body(bodytxt).show();
+                        // L'interface peut lire à voix haute et émettre un son, selon les réglages du poste.
+                        let _ = app.emit("notify", json!({ "title": title, "body": bodytxt }));
                         acks.push(json!({ "jobId": id, "result": { "ok": true } }));
                     }
                     "impression_billet" => {
@@ -669,7 +698,8 @@ fn main() {
             set_autostart,
             open_received_folder,
             open_display,
-            open_space
+            open_space,
+            ask_lea
         ])
         .setup(|app| {
             // Icône de barre des tâches : afficher / fermer une séance guidée / quitter.

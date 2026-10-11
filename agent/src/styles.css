@@ -57,6 +57,13 @@ details input { margin-top: 8px; width: 100%; }
 .switch input { width: 18px; height: 18px; accent-color: var(--accent); }
 .row { display: flex; gap: 10px; flex-wrap: wrap; }
 .row .btn { flex: 1; min-width: 160px; }
+.volume { display: flex; align-items: center; gap: 10px; font-size: .88rem; }
+.volume input[type="range"] { flex: 1; accent-color: var(--accent); }
+.lea { margin: 6px 0; }
+.lea summary { cursor: pointer; font-size: .9rem; }
+.lea #lea-answer { margin: 8px 0; white-space: pre-wrap; }
+.lea-input { display: flex; gap: 8px; }
+.lea-input input { flex: 1; }
 .msg { margin: 0; font-size: .88rem; min-height: 1.1em; }
 .msg.ok { color: var(--ok); }
 .msg.err { color: var(--err); }
