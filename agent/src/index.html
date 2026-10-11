@@ -57,11 +57,28 @@
 
         <button id="space-btn" class="btn">Ouvrir mon espace (Léa, gestion, quiz élèves)</button>
 
-        <details class="lea">
-          <summary><strong>Demander à Léa</strong> <span class="muted">(réponses publiques)</span></summary>
-          <p class="muted" id="lea-answer">Posez une question : horaires, services, informations publiques de l'espace. Pour vos données, ouvrez votre espace.</p>
+        <details class="lea" open>
+          <summary><strong>Demander à Léa</strong> <span class="muted" id="lea-mode">(réponses publiques)</span></summary>
+
+          <!-- Connexion : pour parler à SA Léa (mails, données, actions à valider) -->
+          <div id="lea-login" class="lea-login">
+            <p class="muted">Connectez-vous pour utiliser votre vraie Léa (vos mails, vos données). Sinon, réponses publiques uniquement.</p>
+            <input id="lea-email" type="email" autocomplete="username" placeholder="E-mail" />
+            <input id="lea-pass" type="password" autocomplete="current-password" placeholder="Mot de passe" />
+            <input id="lea-code" type="text" inputmode="numeric" maxlength="6" placeholder="Code 2FA" class="hidden" />
+            <button id="lea-login-btn" class="btn" type="button">Se connecter</button>
+            <p id="lea-login-msg" class="msg"></p>
+          </div>
+
+          <div id="lea-account" class="lea-account hidden">
+            <span class="muted">Connecté : <strong id="lea-user"></strong></span>
+            <button id="lea-logout-btn" class="btn ghost" type="button">Se déconnecter</button>
+          </div>
+
+          <p class="muted" id="lea-answer">Posez une question. Connecté, Léa agit avec vos droits ; sinon elle ne répond qu'aux infos publiques.</p>
           <div class="lea-input">
             <input id="lea-q" type="text" maxlength="2000" placeholder="Votre question…" />
+            <button id="lea-mic" class="btn ghost" type="button" title="Parler" aria-label="Dicter la question">🎤</button>
             <button id="lea-send" class="btn">Demander</button>
           </div>
         </details>
@@ -72,7 +89,7 @@
         </label>
         <label class="switch">
           <input id="opt-speak" type="checkbox" />
-          <span>Lire les notifications à voix haute</span>
+          <span>Lire à voix haute (notifications et réponses de Léa)</span>
         </label>
         <label class="switch">
           <input id="opt-sound" type="checkbox" />
