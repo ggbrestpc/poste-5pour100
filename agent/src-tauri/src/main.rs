@@ -634,8 +634,15 @@ async fn sync_loop(app: AppHandle, state: Arc<Mutex<Vec<serde_json::Value>>>) {
                         let title = payload.get("title").and_then(|v| v.as_str()).unwrap_or("5pour100");
                         let bodytxt = payload.get("body").and_then(|v| v.as_str()).unwrap_or("");
                         let _ = app.notification().builder().title(title).body(bodytxt).show();
-                        // L'interface peut lire à voix haute et émettre un son, selon les réglages du poste.
-                        let _ = app.emit("notify", json!({ "title": title, "body": bodytxt }));
+                        // Bannière persistante : on remonte la fenêtre de l'agent au premier plan pour que le message soit vu.
+                        if let Some(w) = app.get_webview_window("main") {
+                            let _ = w.show();
+                            let _ = w.unminimize();
+                            let _ = w.set_focus();
+                        }
+                        // L'interface affiche la bannière (visible même sans son), lit à voix haute et émet un son
+                        // selon les réglages du poste et les options du message (persistant, son, répétition).
+                        let _ = app.emit("notify", payload.clone());
                         acks.push(json!({ "jobId": id, "result": { "ok": true } }));
                     }
                     "impression_billet" => {

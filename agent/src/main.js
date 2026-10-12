@@ -52,11 +52,54 @@ function speakText(text) {
   } catch {}
 }
 
+// ------- Bannière de message du formateur (persistante, visible même sans son) -------
+let notifTimer = null;
+
+function showBanner(title, body) {
+  const el = $("notif-banner");
+  if (!el) return;
+  if ($("notif-title")) $("notif-title").textContent = title;
+  if ($("notif-body")) $("notif-body").textContent = body;
+  el.classList.remove("hidden");
+  // Relance l'animation de pulsation à chaque affichage.
+  el.classList.remove("pulse");
+  void el.offsetWidth;
+  el.classList.add("pulse");
+}
+
+function hideBanner() {
+  if (notifTimer) {
+    clearInterval(notifTimer);
+    notifTimer = null;
+  }
+  $("notif-banner")?.classList.add("hidden");
+}
+
 function onNotify(payload) {
   const title = payload?.title || "5pour100";
   const body = payload?.body || "";
-  playBeep();
+  // Le son dépend du réglage du poste ET de l'option du message ; le VISUEL s'affiche dans tous les cas.
+  const wantSound = payload?.sound !== false;
+  const persistent = payload?.persistent !== false;
+  const repeatMs = Number(payload?.repeatMs) || 0;
+
+  showBanner(title, body);
+  if (wantSound) playBeep();
   speakText(body ? `${title}. ${body}` : title);
+
+  if (notifTimer) {
+    clearInterval(notifTimer);
+    notifTimer = null;
+  }
+  if (repeatMs >= 10000) {
+    notifTimer = setInterval(() => {
+      showBanner(title, body);
+      if (wantSound) playBeep();
+    }, repeatMs);
+  } else if (!persistent) {
+    // Message non persistant : la bannière se referme seule après quelques secondes.
+    setTimeout(hideBanner, 8000);
+  }
 }
 
 function initSettingsUI() {
@@ -322,6 +365,7 @@ window.addEventListener("DOMContentLoaded", () => {
   $("lea-code")?.addEventListener("keydown", (e) => {
     if (e.key === "Enter") doLeaLogin();
   });
+  $("notif-ack")?.addEventListener("click", hideBanner);
   refreshLeaAuth();
   initSettingsUI();
   $("code").addEventListener("keydown", (e) => {

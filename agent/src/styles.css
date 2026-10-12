@@ -70,5 +70,23 @@ details input { margin-top: 8px; width: 100%; }
 .msg.ok { color: var(--ok); }
 .msg.err { color: var(--err); }
 .hidden { display: none; }
+/* Bannière de message du formateur : overlay haut, persistante, pulsation d'appel. */
+.notif {
+  position: fixed; inset: 0 0 auto 0; z-index: 9999;
+  padding: 12px; background: linear-gradient(135deg, #f6dfa4, #d4af37);
+  color: #17120a; box-shadow: 0 10px 34px rgba(0,0,0,.45);
+  animation: notif-in .25s ease-out;
+}
+.notif.pulse { animation: notif-pulse .8s ease-in-out; }
+.notif-inner { display: flex; align-items: center; gap: 12px; max-width: 720px; margin: 0 auto; }
+.notif-icon { font-size: 1.5rem; }
+.notif-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.notif-text strong { font-size: 1rem; }
+.notif-text span { font-size: .95rem; overflow-wrap: anywhere; }
+.notif .btn { background: #17120a; color: #f6dfa4; padding: 10px 16px; flex: 0 0 auto; }
+.notif .btn:hover { filter: brightness(1.2); }
+@keyframes notif-in { from { transform: translateY(-100%); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+@keyframes notif-pulse { 0%,100% { filter: none; } 50% { filter: brightness(1.25); } }
+
 .foot { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: .76rem; padding-top: 4px; }
 .foot-logo { width: 18px; height: 18px; border-radius: 5px; background: linear-gradient(135deg, #3b82f6, #7c6cff); color: #fff; font-weight: 800; font-size: 11px; display: grid; place-items: center; }
