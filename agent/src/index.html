@@ -117,6 +117,19 @@
         <span>5pour100 · Hébergé en France · Vos données restent chez vous</span>
       </footer>
     </main>
+
+    <!-- Bannière de message du formateur : persistante (reste jusqu'à « J'ai lu »), visible même sans son. -->
+    <div id="notif-banner" class="notif hidden" role="alert" aria-live="assertive">
+      <div class="notif-inner">
+        <div class="notif-icon" aria-hidden="true">📣</div>
+        <div class="notif-text">
+          <strong id="notif-title">Message</strong>
+          <span id="notif-body"></span>
+        </div>
+        <button id="notif-ack" class="btn" type="button">J'ai lu</button>
+      </div>
+    </div>
+
     <script src="main.js"></script>
   </body>
 </html>

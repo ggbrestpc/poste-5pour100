@@ -52,11 +52,54 @@ function speakText(text) {
   } catch {}
 }
 
+// ------- Bannière de message du formateur (persistante, visible même sans son) -------
+let notifTimer = null;
+
+function showBanner(title, body) {
+  const el = $("notif-banner");
+  if (!el) return;
+  if ($("notif-title")) $("notif-title").textContent = title;
+  if ($("notif-body")) $("notif-body").textContent = body;
+  el.classList.remove("hidden");
+  // Relance l'animation de pulsation à chaque affichage.
+  el.classList.remove("pulse");
+  void el.offsetWidth;
+  el.classList.add("pulse");
+}
+
+function hideBanner() {
+  if (notifTimer) {
+    clearInterval(notifTimer);
+    notifTimer = null;
+  }
+  $("notif-banner")?.classList.add("hidden");
+}
+
 function onNotify(payload) {
   const title = payload?.title || "5pour100";
   const body = payload?.body || "";
-  playBeep();
+  // Le son dépend du réglage du poste ET de l'option du message ; le VISUEL s'affiche dans tous les cas.
+  const wantSound = payload?.sound !== false;
+  const persistent = payload?.persistent !== false;
+  const repeatMs = Number(payload?.repeatMs) || 0;
+
+  showBanner(title, body);
+  if (wantSound) playBeep();
   speakText(body ? `${title}. ${body}` : title);
+
+  if (notifTimer) {
+    clearInterval(notifTimer);
+    notifTimer = null;
+  }
+  if (repeatMs >= 10000) {
+    notifTimer = setInterval(() => {
+      showBanner(title, body);
+      if (wantSound) playBeep();
+    }, repeatMs);
+  } else if (!persistent) {
+    // Message non persistant : la bannière se referme seule après quelques secondes.
+    setTimeout(hideBanner, 8000);
+  }
 }
 
 function initSettingsUI() {
@@ -88,6 +131,31 @@ function initSettingsUI() {
 }
 
 let leaUser = ""; // nom de l'utilisateur connecté sur ce poste, "" si personne
+const LEA_EXPIRED_MSG = "Votre session a expiré. Reconnectez-vous pour retrouver votre Léa complète.";
+
+// Session expirée/révoquée (401) : le jeton local est déjà effacé côté Rust ; on repasse en
+// « déconnecté » et on affiche l'écran de connexion avec un message clair.
+async function onLeaExpired() {
+  await refreshLeaAuth();
+  const msg = $("lea-login-msg");
+  if (msg) {
+    msg.textContent = LEA_EXPIRED_MSG;
+    msg.className = "msg err";
+  }
+  $("lea-email")?.focus();
+}
+
+// Vérifie la session auprès du serveur (au démarrage puis toutes les heures) : la prolonge tant
+// que l'agent tourne (expiration glissante) et détecte une expiration ou une révocation.
+async function checkLeaSession() {
+  try {
+    await invoke("lea_check");
+    await refreshLeaAuth();
+  } catch (e) {
+    if (String(e).includes("SESSION_EXPIREE")) await onLeaExpired();
+    else await refreshLeaAuth();
+  }
+}
 
 async function refreshLeaAuth() {
   try {
@@ -159,7 +227,12 @@ async function askLea() {
     out.textContent = answer;
     speakText(answer); // lecture à voix haute de la réponse (selon le réglage)
   } catch (e) {
-    out.textContent = String(e);
+    if (String(e).includes("SESSION_EXPIREE")) {
+      out.textContent = LEA_EXPIRED_MSG;
+      await onLeaExpired();
+    } else {
+      out.textContent = String(e);
+    }
   }
 }
 
@@ -322,7 +395,10 @@ window.addEventListener("DOMContentLoaded", () => {
   $("lea-code")?.addEventListener("keydown", (e) => {
     if (e.key === "Enter") doLeaLogin();
   });
+  $("notif-ack")?.addEventListener("click", hideBanner);
   refreshLeaAuth();
+  checkLeaSession();
+  setInterval(checkLeaSession, 60 * 60 * 1000);
   initSettingsUI();
   $("code").addEventListener("keydown", (e) => {
     if (e.key === "Enter") doPair();

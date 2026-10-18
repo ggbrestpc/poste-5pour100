@@ -350,6 +350,59 @@ fn lea_me(app: AppHandle) -> String {
     }
 }
 
+/// Oublie l'utilisateur connecté sur ce poste (jeton local + nom), sans appel serveur.
+/// Utilisé quand le serveur répond 401 (session expirée ou révoquée) ou que le poste est délié.
+fn lea_forget(app: &AppHandle) {
+    user_token_set(None);
+    let mut cfg = load_config(app);
+    if cfg.user_name.is_some() {
+        cfg.user_name = None;
+        let _ = save_config(app, &cfg);
+    }
+}
+
+/// Marqueur d'erreur reconnu par l'interface : session expirée → écran de connexion.
+const SESSION_EXPIREE: &str = "SESSION_EXPIREE";
+
+/// Vérifie la session de l'utilisateur auprès du serveur (et la prolonge : expiration glissante).
+/// Renvoie le nom de l'utilisateur, "" si personne n'est connecté, ou l'erreur SESSION_EXPIREE
+/// (jeton local effacé) si le serveur la refuse. Hors ligne : on garde l'état local.
+#[tauri::command]
+async fn lea_check(app: AppHandle) -> Result<String, String> {
+    let c = load_config(&app);
+    let Some(user) = user_token_get() else { return Ok(String::new()) };
+    let Some(device) = c.token.clone() else {
+        lea_forget(&app);
+        return Err(SESSION_EXPIREE.to_string());
+    };
+    let resp = reqwest::Client::new()
+        .get(format!("{}/api/agent/lea", c.server_url.trim_end_matches('/')))
+        .bearer_auth(&user)
+        .header("x-device-token", &device)
+        .timeout(Duration::from_secs(20))
+        .send()
+        .await;
+    let resp = match resp {
+        Ok(r) => r,
+        Err(_) => return Ok(c.user_name.unwrap_or_default()),
+    };
+    if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
+        lea_forget(&app);
+        return Err(SESSION_EXPIREE.to_string());
+    }
+    if !resp.status().is_success() {
+        return Ok(c.user_name.unwrap_or_default());
+    }
+    let data: serde_json::Value = resp.json().await.unwrap_or_default();
+    let name = data.get("userName").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    if !name.is_empty() && c.user_name.as_deref() != Some(name.as_str()) {
+        let mut cfg = load_config(&app);
+        cfg.user_name = Some(name.clone());
+        let _ = save_config(&app, &cfg);
+    }
+    Ok(if name.is_empty() { c.user_name.unwrap_or_default() } else { name })
+}
+
 /// Déconnexion de l'utilisateur : invalide la session côté serveur et efface le jeton local.
 #[tauri::command]
 async fn lea_logout(app: AppHandle) {
@@ -390,6 +443,11 @@ async fn lea_ask_full(app: AppHandle, message: String) -> Result<String, String>
         .send()
         .await
         .map_err(|e| format!("Connexion impossible : {e}"))?;
+    if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
+        // Session expirée ou révoquée : on efface le jeton local, l'interface repasse en « déconnecté ».
+        lea_forget(&app);
+        return Err(SESSION_EXPIREE.to_string());
+    }
     let ok = resp.status().is_success();
     let data: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
     if !ok {
@@ -449,6 +507,7 @@ fn set_server(app: AppHandle, url: String) -> Result<(), String> {
 
 #[tauri::command]
 fn unpair(app: AppHandle) -> Result<(), String> {
+    lea_forget(&app);
     let mut c = load_config(&app);
     c.token = None;
     c.device_name = None;
@@ -587,7 +646,8 @@ async fn sync_loop(app: AppHandle, state: Arc<Mutex<Vec<serde_json::Value>>>) {
             }
         };
         if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
-            // Poste révoqué : on efface le jeton local.
+            // Poste révoqué : on efface le jeton local (et la session utilisateur liée au poste).
+            lea_forget(&app);
             let mut cfg = load_config(&app);
             cfg.token = None;
             let _ = save_config(&app, &cfg);
@@ -634,8 +694,15 @@ async fn sync_loop(app: AppHandle, state: Arc<Mutex<Vec<serde_json::Value>>>) {
                         let title = payload.get("title").and_then(|v| v.as_str()).unwrap_or("5pour100");
                         let bodytxt = payload.get("body").and_then(|v| v.as_str()).unwrap_or("");
                         let _ = app.notification().builder().title(title).body(bodytxt).show();
-                        // L'interface peut lire à voix haute et émettre un son, selon les réglages du poste.
-                        let _ = app.emit("notify", json!({ "title": title, "body": bodytxt }));
+                        // Bannière persistante : on remonte la fenêtre de l'agent au premier plan pour que le message soit vu.
+                        if let Some(w) = app.get_webview_window("main") {
+                            let _ = w.show();
+                            let _ = w.unminimize();
+                            let _ = w.set_focus();
+                        }
+                        // L'interface affiche la bannière (visible même sans son), lit à voix haute et émet un son
+                        // selon les réglages du poste et les options du message (persistant, son, répétition).
+                        let _ = app.emit("notify", payload.clone());
                         acks.push(json!({ "jobId": id, "result": { "ok": true } }));
                     }
                     "impression_billet" => {
@@ -825,7 +892,8 @@ fn main() {
             lea_login,
             lea_me,
             lea_logout,
-            lea_ask_full
+            lea_ask_full,
+            lea_check
         ])
         .setup(|app| {
             // Icône de barre des tâches : afficher / fermer une séance guidée / quitter.
