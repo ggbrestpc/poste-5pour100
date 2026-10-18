@@ -144,7 +144,17 @@ mécanisme est **inactif tant qu'une clé de mise à jour n'est pas configurée*
 sans conséquence) — c'est volontaire : la CI compile sans clé. Cette clé « updater » (minisign) est
 **distincte de la signature OS** (Apple/Windows) et ne coûte rien.
 
-Pour **activer** les mises à jour auto :
+> ✅ **Activé depuis la 0.4.5 (19/10/2026)** : clé publique dans `tauri.conf.json`, clé privée chiffrée et
+> son mot de passe en secrets GitHub (`TAURI_SIGNING_PRIVATE_KEY`, `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`),
+> `createUpdaterArtifacts` actif, `latest.json` pointant vers l'installeur NSIS. Copie de secours de la clé
+> privée : gestionnaire de mots de passe de l'administrateur. **Sans cette clé, plus aucune mise à jour
+> automatique n'est possible** (les postes refuseraient une autre clé).
+>
+> Publier une version : augmenter `version` (tauri.conf.json + Cargo.toml), pousser un tag `agent-vX.Y.Z`,
+> vérifier la release brouillon (installeurs + `.sig` + `latest.json`), puis la **publier** (non
+> pré-release) : l'endpoint `releases/latest/download/latest.json` ne voit que la dernière release publiée.
+
+Procédure initiale (déjà faite) :
 
 1. **Générer une paire de clés** (une seule fois, à conserver précieusement) :
    ```bash
