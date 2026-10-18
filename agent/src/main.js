@@ -131,6 +131,31 @@ function initSettingsUI() {
 }
 
 let leaUser = ""; // nom de l'utilisateur connecté sur ce poste, "" si personne
+const LEA_EXPIRED_MSG = "Votre session a expiré. Reconnectez-vous pour retrouver votre Léa complète.";
+
+// Session expirée/révoquée (401) : le jeton local est déjà effacé côté Rust ; on repasse en
+// « déconnecté » et on affiche l'écran de connexion avec un message clair.
+async function onLeaExpired() {
+  await refreshLeaAuth();
+  const msg = $("lea-login-msg");
+  if (msg) {
+    msg.textContent = LEA_EXPIRED_MSG;
+    msg.className = "msg err";
+  }
+  $("lea-email")?.focus();
+}
+
+// Vérifie la session auprès du serveur (au démarrage puis toutes les heures) : la prolonge tant
+// que l'agent tourne (expiration glissante) et détecte une expiration ou une révocation.
+async function checkLeaSession() {
+  try {
+    await invoke("lea_check");
+    await refreshLeaAuth();
+  } catch (e) {
+    if (String(e).includes("SESSION_EXPIREE")) await onLeaExpired();
+    else await refreshLeaAuth();
+  }
+}
 
 async function refreshLeaAuth() {
   try {
@@ -202,7 +227,12 @@ async function askLea() {
     out.textContent = answer;
     speakText(answer); // lecture à voix haute de la réponse (selon le réglage)
   } catch (e) {
-    out.textContent = String(e);
+    if (String(e).includes("SESSION_EXPIREE")) {
+      out.textContent = LEA_EXPIRED_MSG;
+      await onLeaExpired();
+    } else {
+      out.textContent = String(e);
+    }
   }
 }
 
@@ -367,6 +397,8 @@ window.addEventListener("DOMContentLoaded", () => {
   });
   $("notif-ack")?.addEventListener("click", hideBanner);
   refreshLeaAuth();
+  checkLeaSession();
+  setInterval(checkLeaSession, 60 * 60 * 1000);
   initSettingsUI();
   $("code").addEventListener("keydown", (e) => {
     if (e.key === "Enter") doPair();
