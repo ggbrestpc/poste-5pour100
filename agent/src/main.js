@@ -371,6 +371,46 @@ async function toggleAutostart(e) {
   }
 }
 
+
+/* --- Bilan de sécurité du poste --- */
+const SECU_LABEL = {
+  mises_a_jour: "Mises à jour du système",
+  chiffrement: "Chiffrement du disque",
+  pare_feu: "Pare-feu",
+  antivirus: "Antivirus",
+  verrouillage: "Verrouillage de l'écran",
+};
+function applyPosture(p) {
+  const list = $("secu-list");
+  if (!list || !p || !Array.isArray(p.checks)) return;
+  list.textContent = "";
+  for (const c of p.checks) {
+    const li = document.createElement("li");
+    li.className = "secu-" + c.status;
+    const icon = c.status === "ok" ? "✅" : c.status === "alerte" ? "⚠️" : "❔";
+    li.textContent = `${icon} ${SECU_LABEL[c.id] || c.id}${c.detail ? " — " + c.detail : ""}`;
+    list.appendChild(li);
+  }
+  const known = p.checks.filter((c) => c.status !== "inconnu");
+  const ok = known.filter((c) => c.status === "ok").length;
+  $("secu-score").textContent = known.length ? `(${Math.round((100 * ok) / known.length)} / 100)` : "";
+}
+async function runSecurityCheck() {
+  const b = $("secu-btn");
+  b.disabled = true;
+  b.textContent = "Bilan en cours…";
+  try {
+    applyPosture(await invoke("security_check"));
+  } catch (e) {
+    const m = $("conn-msg");
+    m.textContent = "Bilan de sécurité : " + String(e);
+    m.className = "msg err";
+  } finally {
+    b.disabled = false;
+    b.textContent = "Refaire le bilan";
+  }
+}
+
 window.addEventListener("DOMContentLoaded", () => {
   $("pair-btn").addEventListener("click", doPair);
   $("unpair-btn").addEventListener("click", doUnpair);
@@ -382,6 +422,7 @@ window.addEventListener("DOMContentLoaded", () => {
     m.textContent = "Impossible d'ouvrir l'espace : " + String(e);
     m.className = "msg err";
   }));
+  $("secu-btn")?.addEventListener("click", runSecurityCheck);
   $("space-browser")?.addEventListener("click", (e) => {
     e.preventDefault();
     invoke("open_space_browser", { path: "/bureau" });
@@ -411,5 +452,6 @@ window.addEventListener("DOMContentLoaded", () => {
   listen("status", (ev) => applyStatus(ev.payload));
   // Notifications : son + lecture vocale selon les réglages.
   listen("notify", (ev) => onNotify(ev.payload));
+  listen("posture", (ev) => applyPosture(ev.payload));
   refresh();
 });

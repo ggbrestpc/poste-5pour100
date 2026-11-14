@@ -4,6 +4,8 @@
 // Le jeton est stocké localement ; il ne quitte jamais la machine.
 #![cfg_attr(all(not(debug_assertions), target_os = "windows"), windows_subsystem = "windows")]
 
+mod posture;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
@@ -1036,6 +1038,52 @@ async fn sync_loop(app: AppHandle, state: Arc<Mutex<Vec<serde_json::Value>>>) {
     }
 }
 
+/// Intervalle entre deux bilans de sécurité envoyés à l'espace.
+const POSTURE_EVERY_SECONDS: u64 = 24 * 3600;
+
+/// Fait le bilan de sécurité du poste (lecture seule, 90 s maximum) et l'envoie à l'espace si le
+/// poste est relié. Le bilan est aussi affiché dans la fenêtre de l'agent (évènement « posture »).
+async fn report_posture(app: &AppHandle) -> Result<serde_json::Value, String> {
+    let collected = tokio::time::timeout(Duration::from_secs(90), tauri::async_runtime::spawn_blocking(posture::collect))
+        .await
+        .map_err(|_| "bilan trop long, abandonné".to_string())?
+        .map_err(|e| e.to_string())?;
+    let (checks, os) = collected;
+    let body = json!({ "agentVersion": env!("CARGO_PKG_VERSION"), "os": os, "checks": checks });
+    let _ = app.emit("posture", body.clone());
+    let c = load_config(app);
+    if let Some(token) = c.token {
+        let resp = reqwest::Client::new()
+            .post(format!("{}/api/agent/securite", c.server_url.trim_end_matches('/')))
+            .bearer_auth(&token)
+            .json(&body)
+            .timeout(Duration::from_secs(20))
+            .send()
+            .await
+            .map_err(|e| format!("envoi impossible : {e}"))?;
+        // 404 : espace pas encore à jour (route absente) ; on garde le bilan local sans erreur.
+        if !resp.status().is_success() && resp.status() != reqwest::StatusCode::NOT_FOUND {
+            return Err(format!("envoi refusé ({})", resp.status()));
+        }
+    }
+    Ok(body)
+}
+
+/// Bilan au démarrage (après une minute, pour ne pas ralentir l'ouverture de session) puis chaque jour.
+async fn posture_loop(app: AppHandle) {
+    tokio::time::sleep(Duration::from_secs(60)).await;
+    loop {
+        let _ = report_posture(&app).await;
+        tokio::time::sleep(Duration::from_secs(POSTURE_EVERY_SECONDS)).await;
+    }
+}
+
+/// Bilan à la demande (bouton « Refaire le bilan » de la fenêtre de l'agent).
+#[tauri::command]
+async fn security_check(app: AppHandle) -> Result<serde_json::Value, String> {
+    report_posture(&app).await
+}
+
 /// Recherche une mise à jour au démarrage puis toutes les 6 heures : un poste allumé en continu
 /// (démarrage automatique) se met ainsi à jour sans attendre un redémarrage.
 async fn update_loop(app: AppHandle) {
@@ -1101,6 +1149,7 @@ fn main() {
             open_display,
             open_space,
             open_space_browser,
+            security_check,
             ask_lea,
             lea_login,
             lea_me,
@@ -1164,6 +1213,12 @@ fn main() {
             let acks = state.acks.clone();
             tauri::async_runtime::spawn(async move {
                 sync_loop(handle, acks).await;
+            });
+
+            // Bilan de sécurité du poste : une minute après le démarrage, puis chaque jour.
+            let pst = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                posture_loop(pst).await;
             });
 
             // Mise à jour automatique (silencieuse) au démarrage puis toutes les 6 heures.
