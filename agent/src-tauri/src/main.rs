@@ -23,6 +23,19 @@ use tokio::sync::Mutex;
 
 const DEFAULT_SERVER: &str = "https://my.5pour100.fr";
 const POLL_SECONDS: u64 = 5;
+/// Attente maximale entre deux tentatives quand le serveur est injoignable.
+const MAX_BACKOFF_SECONDS: u64 = 60;
+/// Intervalle entre deux recherches de mise à jour (l'agent reste souvent allumé des semaines).
+const UPDATE_EVERY_SECONDS: u64 = 6 * 3600;
+
+/// Attente avant la prochaine synchro : 5 s en temps normal, puis 10, 20, 40, 60 s après des
+/// échecs successifs (serveur injoignable), pour ne pas marteler le réseau ni le serveur.
+fn next_delay(failures: u32) -> u64 {
+    if failures == 0 {
+        return POLL_SECONDS;
+    }
+    POLL_SECONDS.saturating_mul(1u64 << failures.min(10)).min(MAX_BACKOFF_SECONDS)
+}
 
 #[derive(Serialize, Deserialize, Clone)]
 struct Config {
@@ -689,14 +702,15 @@ fn emit_status(app: &AppHandle, connected: bool, last_action: &str, jobs_total: 
 /// Boucle de fond : synchronise les tâches tant qu'un jeton est présent.
 async fn sync_loop(app: AppHandle, state: Arc<Mutex<Vec<serde_json::Value>>>) {
     let client = reqwest::Client::new();
-    let mut ticker = tokio::time::interval(Duration::from_secs(POLL_SECONDS));
     let mut jobs_total: u64 = 0;
+    // Échecs réseau consécutifs : allongent l'attente entre deux tentatives.
+    let mut failures: u32 = 0;
     // Supports de classe déjà téléchargés (évite de les reprendre à chaque cycle).
     let mut classe_seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     // Tâches déjà exécutées (idempotence), persistées entre les redémarrages.
     let mut processed: Vec<String> = load_processed(&app);
     loop {
-        ticker.tick().await;
+        tokio::time::sleep(Duration::from_secs(next_delay(failures))).await;
         let c = load_config(&app);
         let (server, token) = match c.token {
             Some(t) => (c.server_url, t),
@@ -720,10 +734,13 @@ async fn sync_loop(app: AppHandle, state: Arc<Mutex<Vec<serde_json::Value>>>) {
                 // Réseau indisponible : on remet les acquittements en file pour réessayer.
                 let mut guard = state.lock().await;
                 guard.splice(0..0, done);
-                emit_status(&app, false, "Hors ligne — nouvelle tentative…", jobs_total);
+                failures = failures.saturating_add(1);
+                let wait = next_delay(failures);
+                emit_status(&app, false, &format!("Hors ligne — nouvelle tentative dans {wait} s"), jobs_total);
                 continue;
             }
         };
+        failures = 0;
         if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
             // Poste révoqué : on efface le jeton local (et la session utilisateur liée au poste).
             lea_forget(&app);
@@ -927,14 +944,30 @@ async fn sync_loop(app: AppHandle, state: Arc<Mutex<Vec<serde_json::Value>>>) {
     }
 }
 
+/// Recherche une mise à jour au démarrage puis toutes les 6 heures : un poste allumé en continu
+/// (démarrage automatique) se met ainsi à jour sans attendre un redémarrage.
+async fn update_loop(app: AppHandle) {
+    loop {
+        check_update(&app).await;
+        tokio::time::sleep(Duration::from_secs(UPDATE_EVERY_SECONDS)).await;
+    }
+}
+
 /// Vérifie et installe une mise à jour si disponible, puis relance l'agent. Silencieux et tolérant :
-/// toute erreur (pas de clé updater, hors ligne, aucune release) est ignorée.
-async fn check_update(app: AppHandle) {
+/// toute erreur (pas de clé updater, hors ligne, aucune release) est ignorée. Jamais pendant une
+/// séance guidée : la relance fermerait la fenêtre de l'élève ; on réessaie au cycle suivant.
+async fn check_update(app: &AppHandle) {
+    if app.get_webview_window("diffusion").is_some() {
+        return;
+    }
     let updater = match app.updater() {
         Ok(u) => u,
         Err(_) => return,
     };
     if let Ok(Some(update)) = updater.check().await {
+        if app.get_webview_window("diffusion").is_some() {
+            return;
+        }
         let _ = app
             .notification()
             .builder()
@@ -1024,11 +1057,10 @@ fn main() {
                 sync_loop(handle, acks).await;
             });
 
-            // Mise à jour automatique au démarrage (silencieuse). Inactive tant que la clé « updater »
-            // (plugins.updater.pubkey) n'est pas renseignée : check() échoue alors et on ne fait rien.
+            // Mise à jour automatique (silencieuse) au démarrage puis toutes les 6 heures.
             let up = app.handle().clone();
             tauri::async_runtime::spawn(async move {
-                check_update(up).await;
+                update_loop(up).await;
             });
             Ok(())
         })
@@ -1090,6 +1122,13 @@ mod tests {
         let b = unique_path(&dir, "billet.pdf");
         assert_eq!(b.file_name().unwrap(), "billet (2).pdf");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn attente_progressive_hors_ligne() {
+        let seq: Vec<u64> = (0..7).map(next_delay).collect();
+        assert_eq!(seq, vec![5, 10, 20, 40, 60, 60, 60]);
+        assert_eq!(next_delay(u32::MAX), 60);
     }
 
     #[test]
