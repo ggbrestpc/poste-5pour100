@@ -382,6 +382,10 @@ window.addEventListener("DOMContentLoaded", () => {
     m.textContent = "Impossible d'ouvrir l'espace : " + String(e);
     m.className = "msg err";
   }));
+  $("space-browser")?.addEventListener("click", (e) => {
+    e.preventDefault();
+    invoke("open_space_browser", { path: "/bureau" });
+  });
   $("lea-send")?.addEventListener("click", askLea);
   $("lea-mic")?.addEventListener("click", toggleMic);
   $("lea-q")?.addEventListener("keydown", (e) => {
