@@ -610,6 +610,8 @@ async fn lea_check(app: AppHandle) -> Result<String, String> {
 /// Déconnexion de l'utilisateur : invalide la session côté serveur et efface le jeton local.
 #[tauri::command]
 async fn lea_logout(app: AppHandle) {
+    // Plus aucun envoi de dossier au nom de cette personne, même par un passage en cours.
+    dossiers_cancel();
     let c = load_config(&app);
     if let Some(ut) = user_token_get() {
         let client = reqwest::Client::new();
@@ -771,7 +773,9 @@ fn set_server(app: AppHandle, url: String) -> Result<(), String> {
 #[tauri::command]
 fn unpair(app: AppHandle) -> Result<(), String> {
     lea_forget(&app);
-    // Poste délié : les dossiers connectés sont oubliés (l'espace les coupe aussi quand il révoque le poste).
+    // Poste délié : un envoi en cours s'arrête et les dossiers connectés sont oubliés
+    // (l'espace les coupe aussi quand il révoque le poste).
+    dossiers_cancel();
     let _ = std::fs::remove_file(dossiers_path(&app));
     let mut c = load_config(&app);
     c.token = None;
@@ -1217,6 +1221,40 @@ async fn posture_loop(app: AppHandle) {
 
 /// Un seul accès à la fois à dossiers.json (boucle d'envoi et commandes de l'interface).
 static DOSSIERS_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+/// Change quand le poste est délié ou la personne déconnectée : un passage en cours s'arrête
+/// avant l'envoi suivant et n'écrit plus rien (les identifiants qu'il a lus ne servent plus).
+static DOSSIERS_EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn dossiers_cancel() {
+    DOSSIERS_EPOCH.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+}
+
+fn dossiers_epoch() -> u64 {
+    DOSSIERS_EPOCH.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// Relit le fichier juste avant l'envoi : il doit être identique à l'instantané (taille, date),
+/// toujours stable, et ne pas changer pendant la lecture. Sinon il attend le passage suivant.
+fn read_stable(p: &Path, expected: dossiers::Seen) -> Option<Vec<u8>> {
+    use std::io::Read;
+    let stat = || -> Option<dossiers::Seen> {
+        let m = std::fs::symlink_metadata(p).ok()?;
+        if !m.file_type().is_file() {
+            return None;
+        }
+        let mtime = m.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs();
+        Some(dossiers::Seen { len: m.len(), mtime })
+    };
+    if stat()? != expected || expected.mtime + DOSSIERS_SETTLE_SECONDS > now_secs() {
+        return None;
+    }
+    let mut buf = Vec::new();
+    std::fs::File::open(p).ok()?.take(SHARE_MAX_BYTES + 1).read_to_end(&mut buf).ok()?;
+    if buf.len() as u64 != expected.len || stat()? != expected {
+        return None;
+    }
+    Some(buf)
+}
 /// Envoi toutes les minutes ; un fichier doit être stable depuis 15 s ; au plus 10 envois par dossier et par passage.
 const DOSSIERS_EVERY_SECONDS: u64 = 60;
 const DOSSIERS_SETTLE_SECONDS: u64 = 15;
@@ -1385,6 +1423,7 @@ async fn dossier_push(server: &str, user: &str, device: &str, id: &str, name: &s
 /// Un passage : liste les connexions de la personne connectée, oublie celles coupées, envoie les nouveaux fichiers.
 async fn dossiers_pass(app: &AppHandle) {
     let _g = DOSSIERS_LOCK.lock().await;
+    let epoch = dossiers_epoch();
     let mut s = load_dossiers(app);
     if s.items.is_empty() {
         return;
@@ -1448,7 +1487,10 @@ async fn dossiers_pass(app: &AppHandle) {
                 d.seen.insert(name, seen);
                 continue;
             }
-            let Ok(bytes) = std::fs::read(&p) else { continue };
+            if dossiers_epoch() != epoch {
+                return;
+            }
+            let Some(bytes) = read_stable(&p, seen) else { continue };
             match dossier_push(&server, &user, &device, &d.id, &name, &bytes).await {
                 Envoi::Ok => {
                     d.sent += 1;
@@ -1473,6 +1515,10 @@ async fn dossiers_pass(app: &AppHandle) {
         dossiers::prune(&mut d.seen, &snap);
     }
     s.items.retain(|d| !cut.contains(&d.id));
+    if dossiers_epoch() != epoch {
+        // Poste délié ou personne déconnectée pendant le passage : rien n'est réécrit.
+        return;
+    }
     save_dossiers(app, &s);
     if stop {
         lea_forget(app);
