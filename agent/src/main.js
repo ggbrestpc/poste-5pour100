@@ -449,6 +449,22 @@ async function bouclierAnswer(accept) {
   }
 }
 
+/* --- Partage choisi : la personne choisit le fichier, partagé à son nom --- */
+async function shareFile() {
+  const b = $("share-btn");
+  const m = $("share-msg");
+  b.disabled = true;
+  m.textContent = "";
+  try {
+    const r = await invoke("share_file", { visibilite: $("share-vis").value });
+    if (r.ok) m.textContent = `« ${r.name} » partagé ${r.visibilite === "equipe" ? "avec l'équipe" : "pour vous seulement"}.`;
+  } catch (e) {
+    m.textContent = String(e);
+  } finally {
+    b.disabled = false;
+  }
+}
+
 window.addEventListener("DOMContentLoaded", () => {
   $("pair-btn").addEventListener("click", doPair);
   $("unpair-btn").addEventListener("click", doUnpair);
@@ -492,6 +508,7 @@ window.addEventListener("DOMContentLoaded", () => {
   listen("notify", (ev) => onNotify(ev.payload));
   listen("posture", (ev) => applyPosture(ev.payload));
   listen("bouclier", (ev) => applyBouclier(ev.payload));
+  $("share-btn")?.addEventListener("click", shareFile);
   $("boucl-yes")?.addEventListener("click", () => bouclierAnswer(true));
   $("boucl-no")?.addEventListener("click", () => bouclierAnswer(false));
   invoke("bouclier_status").then(applyBouclier).catch(() => {});
