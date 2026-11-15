@@ -471,6 +471,61 @@ async function shareFile() {
   }
 }
 
+/* --- Dossiers connectés : export d'un logiciel local envoyé à l'espace --- */
+function applyDossiers(list) {
+  const ul = $("dos-list");
+  if (!ul) return;
+  ul.replaceChildren();
+  for (const d of list || []) {
+    const li = document.createElement("li");
+    const pour = d.visibilite === "equipe" ? "équipe" : "moi seulement";
+    li.textContent = `${d.label} (${pour}) · ${d.sent} fichier${d.sent > 1 ? "s" : ""} envoyé${d.sent > 1 ? "s" : ""}${d.lastError ? " · " + d.lastError : ""} `;
+    li.title = d.path;
+    const b = document.createElement("button");
+    b.className = "btn ghost small";
+    b.type = "button";
+    b.textContent = "Déconnecter";
+    b.addEventListener("click", () => disconnectDossier(d.id, b));
+    li.appendChild(b);
+    ul.appendChild(li);
+  }
+}
+
+async function connectDossier() {
+  const b = $("dos-btn");
+  const m = $("dos-msg");
+  b.disabled = true;
+  m.textContent = "";
+  try {
+    const r = await invoke("dossier_connect", { visibilite: $("dos-vis").value });
+    if (r.ok) {
+      m.textContent = `« ${r.label} » est connecté : les prochains fichiers qui y arrivent seront envoyés à votre espace.`;
+      applyDossiers(r.dossiers);
+    }
+  } catch (e) {
+    if (String(e).includes("SESSION_EXPIREE")) {
+      m.textContent = "Votre session a expiré : reconnectez-vous dans la section Léa, puis recommencez.";
+      await onLeaExpired();
+    } else {
+      m.textContent = String(e);
+    }
+  } finally {
+    b.disabled = false;
+  }
+}
+
+async function disconnectDossier(id, b) {
+  b.disabled = true;
+  try {
+    const r = await invoke("dossier_disconnect", { id });
+    $("dos-msg").textContent = r.note || "Dossier déconnecté : plus rien n'en est envoyé.";
+    applyDossiers(r.dossiers);
+  } catch (e) {
+    $("dos-msg").textContent = String(e);
+    b.disabled = false;
+  }
+}
+
 window.addEventListener("DOMContentLoaded", () => {
   $("pair-btn").addEventListener("click", doPair);
   $("unpair-btn").addEventListener("click", doUnpair);
@@ -515,6 +570,9 @@ window.addEventListener("DOMContentLoaded", () => {
   listen("posture", (ev) => applyPosture(ev.payload));
   listen("bouclier", (ev) => applyBouclier(ev.payload));
   $("share-btn")?.addEventListener("click", shareFile);
+  $("dos-btn")?.addEventListener("click", connectDossier);
+  listen("dossiers", (ev) => applyDossiers(ev.payload));
+  invoke("dossiers_list").then(applyDossiers).catch(() => {});
   $("boucl-yes")?.addEventListener("click", () => bouclierAnswer(true));
   $("boucl-no")?.addEventListener("click", () => bouclierAnswer(false));
   invoke("bouclier_status").then(applyBouclier).catch(() => {});
