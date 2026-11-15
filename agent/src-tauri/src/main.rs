@@ -4,6 +4,7 @@
 // Le jeton est stocké localement ; il ne quitte jamais la machine.
 #![cfg_attr(all(not(debug_assertions), target_os = "windows"), windows_subsystem = "windows")]
 
+mod bouclier;
 mod posture;
 
 use std::path::{Path, PathBuf};
@@ -876,6 +877,7 @@ async fn sync_loop(app: AppHandle, state: Arc<Mutex<Vec<serde_json::Value>>>) {
                     "emargement" => "Émargement ouvert",
                     "affichage" => "Affichage à l'écran",
                     "diffusion" => "Séance guidée",
+                    "bouclier" => "Demande Bouclier",
                     _ => "Tâche reçue",
                 }
                 .to_string();
@@ -967,6 +969,32 @@ async fn sync_loop(app: AppHandle, state: Arc<Mutex<Vec<serde_json::Value>>>) {
                             None => acks.push(json!({ "jobId": id, "error": "adresse d'affichage refusée" })),
                         }
                     }
+                    "bouclier" => match bouclier::parse_request(&payload) {
+                        Ok(req) => {
+                            let mut saved = load_bouclier(&app);
+                            if req.action == "retirer" && saved.applied.is_none() {
+                                // Rien n'a été réglé sur ce poste : le retrait est immédiat.
+                                saved.pending = None;
+                                save_bouclier(&app, &saved);
+                                let a = app.clone();
+                                tauri::async_runtime::spawn(async move {
+                                    let _ = report_bouclier(&a, "retire", None).await;
+                                });
+                            } else {
+                                saved.pending = Some(req);
+                                save_bouclier(&app, &saved);
+                                let _ = app.notification().builder().title("5pour100 — Bouclier").body("Votre espace demande votre accord dans l'agent (Sécurité de ce poste).").show();
+                                if let Some(w) = app.get_webview_window("main") {
+                                    let _ = w.show();
+                                    let _ = w.unminimize();
+                                    let _ = w.set_focus();
+                                }
+                            }
+                            let _ = app.emit("bouclier", bouclier_view(&saved));
+                            acks.push(json!({ "jobId": id, "result": { "ok": true, "pending": saved.pending.is_some() } }));
+                        }
+                        Err(e) => acks.push(json!({ "jobId": id, "error": e })),
+                    },
                     other => {
                         acks.push(json!({ "jobId": id, "error": format!("type « {other} » non pris en charge par cette version de l'agent") }));
                     }
@@ -1072,8 +1100,170 @@ async fn posture_loop(app: AppHandle) {
     tokio::time::sleep(Duration::from_secs(60)).await;
     loop {
         let _ = report_posture(&app).await;
+        // Profil Bouclier installé plus tard (macOS) : constaté au bilan suivant.
+        let _ = bouclier_verify(&app).await;
         tokio::time::sleep(Duration::from_secs(POSTURE_EVERY_SECONDS)).await;
     }
+}
+
+/* ------------------------------ Bouclier en un clic ------------------------------ */
+
+fn bouclier_path(app: &AppHandle) -> PathBuf {
+    config_path(app).with_file_name("bouclier.json")
+}
+
+fn load_bouclier(app: &AppHandle) -> bouclier::Saved {
+    std::fs::read_to_string(bouclier_path(app)).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()
+}
+
+fn save_bouclier(app: &AppHandle, s: &bouclier::Saved) {
+    if let Ok(txt) = serde_json::to_string_pretty(s) {
+        let _ = std::fs::write(bouclier_path(app), txt);
+    }
+}
+
+fn current_os() -> &'static str {
+    if cfg!(target_os = "windows") {
+        "windows"
+    } else if cfg!(target_os = "macos") {
+        "macos"
+    } else {
+        "linux"
+    }
+}
+
+fn bouclier_view(s: &bouclier::Saved) -> serde_json::Value {
+    json!({
+        "pending": s.pending.as_ref().map(|p| json!({ "action": p.action })),
+        "applied": s.applied.is_some(),
+        "verified": s.applied.as_ref().map(|a| a.verified).unwrap_or(false),
+        "os": current_os(),
+    })
+}
+
+/// Hôte de l'espace : il doit rester joignable une fois le Bouclier en place (témoin).
+fn witness_host(server: &str) -> String {
+    url::Url::parse(server).ok().and_then(|u| u.host_str().map(String::from)).unwrap_or_else(|| "my.5pour100.fr".into())
+}
+
+/// Déclare à l'espace l'issue du Bouclier sur CE poste (jeton du poste).
+async fn report_bouclier(app: &AppHandle, state: &str, detail: Option<String>) -> Result<(), String> {
+    let c = load_config(app);
+    let Some(token) = c.token else { return Ok(()) };
+    reqwest::Client::new()
+        .post(format!("{}/api/agent/bouclier", c.server_url.trim_end_matches('/')))
+        .bearer_auth(&token)
+        .json(&json!({ "state": state, "detail": detail }))
+        .timeout(Duration::from_secs(20))
+        .send()
+        .await
+        .map_err(|e| format!("envoi impossible : {e}"))?;
+    Ok(())
+}
+
+/// Constate la protection (lecture seule) et la déclare une fois établie.
+async fn bouclier_verify(app: &AppHandle) -> bool {
+    let saved = load_bouclier(app);
+    let Some(applied) = saved.applied.clone() else { return false };
+    if applied.verified {
+        return true;
+    }
+    let witness = witness_host(&load_config(app).server_url);
+    let probe = applied.probe_host.clone();
+    let ok = tauri::async_runtime::spawn_blocking(move || bouclier::is_protected(&witness, &probe)).await.ok().flatten() == Some(true);
+    if ok {
+        let mut s = load_bouclier(app);
+        if let Some(a) = s.applied.as_mut() {
+            a.verified = true;
+        }
+        save_bouclier(app, &s);
+        let _ = report_bouclier(app, "actif", None).await;
+        let _ = app.emit("bouclier", bouclier_view(&s));
+    }
+    ok
+}
+
+#[tauri::command]
+fn bouclier_status(app: AppHandle) -> serde_json::Value {
+    bouclier_view(&load_bouclier(&app))
+}
+
+/// « Accepter » dans l'agent : applique (ou retire) le Bouclier avec l'accord du système.
+#[tauri::command]
+async fn bouclier_accept(app: AppHandle) -> Result<serde_json::Value, String> {
+    let mut saved = load_bouclier(&app);
+    let Some(req) = saved.pending.clone() else { return Ok(json!({ "status": bouclier_view(&saved) })) };
+    let message;
+    if req.action == "retirer" {
+        let applied = saved.applied.clone();
+        let res = match applied {
+            Some(a) => tauri::async_runtime::spawn_blocking(move || bouclier::remove(&a)).await.map_err(|e| e.to_string())?,
+            None => Ok(()),
+        };
+        match res {
+            Ok(()) => {
+                saved = bouclier::Saved::default();
+                let _ = report_bouclier(&app, "retire", None).await;
+                message = "Réglages d'origine remis.".to_string();
+            }
+            Err(bouclier::Outcome::Refused) => message = "Accord administrateur refusé : rien n'a changé.".to_string(),
+            Err(bouclier::Outcome::Error(e)) => message = e,
+        }
+    } else {
+        let witness = witness_host(&load_config(&app).server_url);
+        let dir = received_dir(&app);
+        let r = req.clone();
+        let res = tauri::async_runtime::spawn_blocking(move || bouclier::apply(&r, &witness, &dir)).await.map_err(|e| e.to_string())?;
+        saved.pending = None;
+        match res {
+            Ok(applied) => {
+                let verified = applied.verified;
+                saved.applied = Some(applied);
+                if verified {
+                    let _ = report_bouclier(&app, "actif", None).await;
+                    message = "Bouclier actif sur ce poste.".to_string();
+                } else {
+                    message = "Profil ouvert : installez « CINQ Bouclier » dans Réglages Système → Profils.".to_string();
+                    let a = app.clone();
+                    tauri::async_runtime::spawn(async move {
+                        // Le profil s'installe à la main : on constate pendant 15 minutes.
+                        for _ in 0..60 {
+                            tokio::time::sleep(Duration::from_secs(15)).await;
+                            if bouclier_verify(&a).await {
+                                break;
+                            }
+                        }
+                    });
+                }
+            }
+            Err(bouclier::Outcome::Refused) => {
+                let _ = report_bouclier(&app, "refuse", Some("Accord administrateur refusé sur le poste".into())).await;
+                message = "Accord administrateur refusé : rien n'a changé.".to_string();
+            }
+            Err(bouclier::Outcome::Error(e)) => {
+                let _ = report_bouclier(&app, "erreur", Some(e.chars().take(300).collect())).await;
+                message = e;
+            }
+        }
+    }
+    save_bouclier(&app, &saved);
+    let view = bouclier_view(&saved);
+    let _ = app.emit("bouclier", view.clone());
+    Ok(json!({ "status": view, "message": message }))
+}
+
+/// « Refuser » dans l'agent : rien n'est changé, l'espace en est informé.
+#[tauri::command]
+async fn bouclier_refuse(app: AppHandle) -> Result<serde_json::Value, String> {
+    let mut saved = load_bouclier(&app);
+    if let Some(req) = saved.pending.take() {
+        let detail = if req.action == "retirer" { "Retrait refusé sur le poste" } else { "Refusé sur le poste" };
+        let _ = report_bouclier(&app, "refuse", Some(detail.into())).await;
+    }
+    save_bouclier(&app, &saved);
+    let view = bouclier_view(&saved);
+    let _ = app.emit("bouclier", view.clone());
+    Ok(json!({ "status": view, "message": "Rien n'a été changé." }))
 }
 
 /// Bilan à la demande (bouton « Refaire le bilan » de la fenêtre de l'agent).
@@ -1148,6 +1338,9 @@ fn main() {
             open_space,
             open_space_browser,
             security_check,
+            bouclier_status,
+            bouclier_accept,
+            bouclier_refuse,
             ask_lea,
             lea_login,
             lea_me,

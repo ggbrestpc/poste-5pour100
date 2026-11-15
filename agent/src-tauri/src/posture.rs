@@ -41,6 +41,12 @@ fn run(cmd: &str, args: &[&str]) -> Option<String> {
 }
 
 fn run_with_timeout(cmd: &str, args: &[&str], timeout: Duration) -> Option<String> {
+    run_capture(cmd, args, timeout).map(|(_, s)| s)
+}
+
+/// Lance une commande sans console, la tue au-delà du délai, et renvoie son code de sortie et ses
+/// sorties (stdout puis stderr). None si elle n'a pas pu démarrer ou a dépassé le délai.
+pub(crate) fn run_capture(cmd: &str, args: &[&str], timeout: Duration) -> Option<(Option<i32>, String)> {
     use std::io::Read;
     use std::process::Stdio;
     let mut c = Command::new(cmd);
@@ -67,23 +73,23 @@ fn run_with_timeout(cmd: &str, args: &[&str], timeout: Duration) -> Option<Strin
     let deadline = std::time::Instant::now() + timeout;
     let finished = loop {
         match child.try_wait() {
-            Ok(Some(_)) => break true,
+            Ok(Some(st)) => break Some(st.code()),
             Ok(None) if std::time::Instant::now() < deadline => std::thread::sleep(Duration::from_millis(50)),
-            _ => break false,
+            _ => break None,
         }
     };
-    if !finished {
+    let Some(code) = finished else {
         let _ = child.kill();
         let _ = child.wait();
         // Les fils de lecture se terminent d'eux-mêmes à la fermeture des tubes ; on ne les attend pas
         // (un sous-processus petit-enfant pourrait garder le tube ouvert).
         return None;
-    }
+    };
     let stdout = t_out.join().unwrap_or_default();
     let stderr = t_err.join().unwrap_or_default();
     let mut s = String::from_utf8_lossy(&stdout).to_string();
     s.push_str(&String::from_utf8_lossy(&stderr));
-    Some(s)
+    Some((code, s))
 }
 
 fn days_since(t: SystemTime) -> Option<u64> {

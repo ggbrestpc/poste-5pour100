@@ -90,6 +90,17 @@
           <p class="muted">Bilan en lecture seule, fait chaque jour : l'agent constate, il ne change rien. Il est aussi visible par l'administrateur dans l'espace (Agent de bureau).</p>
           <ul id="secu-list" class="secu-list"><li class="muted">Bilan en cours de préparation…</li></ul>
           <button id="secu-btn" class="btn ghost" type="button">Refaire le bilan</button>
+          <div id="boucl" class="boucl">
+            <p><strong>🛡️ Bouclier</strong> <span class="muted" id="boucl-state">Non activé sur ce poste.</span></p>
+            <div id="boucl-ask" class="boucl-ask" hidden>
+              <p id="boucl-text"></p>
+              <div class="row">
+                <button id="boucl-yes" class="btn" type="button">Accepter</button>
+                <button id="boucl-no" class="btn ghost" type="button">Refuser</button>
+              </div>
+            </div>
+            <p class="muted small" id="boucl-msg"></p>
+          </div>
         </details>
 
         <label class="switch">
