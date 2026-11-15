@@ -209,6 +209,23 @@ pub fn parse_ifaces(out: &str) -> Vec<Iface> {
         .collect()
 }
 
+/// Sauvegarde à garder quand le Bouclier est déjà en place : pour une carte déjà gérée, les DNS
+/// d'origine sont ceux de la première sauvegarde (les DNS actuels sont ceux du Bouclier). Les cartes
+/// gérées absentes aujourd'hui (débranchées) restent dans la sauvegarde pour être remises plus tard.
+pub fn merge_backup(prev: Option<&Applied>, fresh: Vec<Iface>) -> Vec<Iface> {
+    let Some(prev) = prev else { return fresh };
+    let mut out: Vec<Iface> = fresh
+        .into_iter()
+        .map(|f| prev.interfaces.iter().find(|p| p.index == f.index).cloned().unwrap_or(f))
+        .collect();
+    for p in &prev.interfaces {
+        if !out.iter().any(|o| o.index == p.index) {
+            out.push(p.clone());
+        }
+    }
+    out
+}
+
 /// Remet les DNS d'origine (fixes ou automatiques) et retire le modèle DoH du Bouclier.
 pub fn win_restore_block(ip: &str, ifaces: &[Iface]) -> String {
     let mut s = String::new();
@@ -303,9 +320,10 @@ fn win_elevated(script: &str) -> Result<i32, Outcome> {
 /* ------------------------------ Appliquer / retirer ------------------------------ */
 
 /// Applique le Bouclier. `witness` = hôte de l'espace (doit rester joignable), `dir` = dossier où
-/// déposer le profil macOS.
+/// déposer le profil macOS, `prev` = Bouclier déjà en place (sa sauvegarde d'origine est gardée),
+/// `persist` = enregistre la sauvegarde sur disque AVANT toute modification du système.
 #[allow(unused_variables)]
-pub fn apply(req: &Request, witness: &str, dir: &std::path::Path) -> Result<Applied, Outcome> {
+pub fn apply(req: &Request, witness: &str, dir: &std::path::Path, prev: Option<&Applied>, persist: &dyn Fn(&Applied) -> bool) -> Result<Applied, Outcome> {
     #[cfg(target_os = "windows")]
     {
         let ip = resolve(&req.host, Duration::from_secs(10))
@@ -315,13 +333,19 @@ pub fn apply(req: &Request, witness: &str, dir: &std::path::Path) -> Result<Appl
         let listed = crate::posture::run_capture("powershell", &["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", WIN_IFACES], Duration::from_secs(20))
             .map(|(_, s)| s)
             .unwrap_or_default();
-        let ifaces = parse_ifaces(&listed);
-        if ifaces.is_empty() {
+        let fresh = parse_ifaces(&listed);
+        if fresh.is_empty() {
             return Err(Outcome::Error("aucune carte réseau active trouvée".into()));
+        }
+        let ifaces = merge_backup(prev, fresh);
+        let applied = Applied { host: req.host.clone(), client_id: req.client_id.clone(), probe_host: req.probe_host.clone(), ip: Some(ip.clone()), interfaces: ifaces.clone(), verified: false };
+        // Sans sauvegarde sur disque, pas de modification : un arrêt brutal ne doit pas perdre les DNS d'origine.
+        if !persist(&applied) {
+            return Err(Outcome::Error("sauvegarde des réglages d'origine impossible : rien n'a été changé".into()));
         }
         let script = win_apply_script(&ip, &doh_template(&req.host, &req.client_id), &ifaces, witness, &req.probe_host);
         return match win_elevated(&script)? {
-            0 => Ok(Applied { host: req.host.clone(), client_id: req.client_id.clone(), probe_host: req.probe_host.clone(), ip: Some(ip), interfaces: ifaces, verified: true }),
+            0 => Ok(Applied { verified: true, ..applied }),
             3 => Err(Outcome::Error("Windows 11 est nécessaire pour le DNS chiffré ; rien n'a été changé".into())),
             4 => Err(Outcome::Error("le DNS du Bouclier ne répondait pas depuis ce réseau : réglages d'origine remis".into())),
             6 => Err(Outcome::Error("le DNS n'était pas chiffré (filtrage non constaté) : réglages d'origine remis".into())),
@@ -429,5 +453,18 @@ mod tests {
         assert!(r.contains("Remove-DnsClientDohServerAddress -ServerAddress '203.0.113.5'"));
         // Encodage UTF-16LE : « A » = 0x41 0x00.
         assert_eq!(encode_ps("A"), "QQA=");
+    }
+
+    #[test]
+    fn sauvegarde_d_origine_gardee() {
+        let first = parse_ifaces("12=\n7=1.1.1.1\n");
+        let prev = Applied { ip: Some("203.0.113.5".into()), interfaces: first.clone(), ..Default::default() };
+        // Deuxième application : les DNS actuels sont ceux du Bouclier, la carte 12 est débranchée, une 9 apparaît.
+        let now = parse_ifaces("7=203.0.113.5\n9=8.8.8.8\n");
+        let merged = merge_backup(Some(&prev), now);
+        assert_eq!(merged.iter().find(|i| i.index == 7).unwrap().static_dns, vec!["1.1.1.1"]);
+        assert_eq!(merged.iter().find(|i| i.index == 9).unwrap().static_dns, vec!["8.8.8.8"]);
+        assert!(merged.iter().find(|i| i.index == 12).unwrap().static_dns.is_empty());
+        assert_eq!(merge_backup(None, first.clone()), first);
     }
 }

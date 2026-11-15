@@ -1213,12 +1213,34 @@ async fn bouclier_accept(app: AppHandle) -> Result<serde_json::Value, String> {
         let witness = witness_host(&load_config(&app).server_url);
         let dir = received_dir(&app);
         let r = req.clone();
-        let res = tauri::async_runtime::spawn_blocking(move || bouclier::apply(&r, &witness, &dir)).await.map_err(|e| e.to_string())?;
+        let prev = saved.applied.clone();
+        let a2 = app.clone();
+        let prev2 = prev.clone();
+        let res = tauri::async_runtime::spawn_blocking(move || {
+            // Sauvegarde écrite AVANT la modification du système, et relue pour s'en assurer.
+            let persist = |applied: &bouclier::Applied| {
+                let mut s = load_bouclier(&a2);
+                s.pending = None;
+                s.applied = Some(applied.clone());
+                save_bouclier(&a2, &s);
+                load_bouclier(&a2).applied.as_ref() == Some(applied)
+            };
+            bouclier::apply(&r, &witness, &dir, prev2.as_ref(), &persist)
+        })
+        .await
+        .map_err(|e| e.to_string())?;
         saved.pending = None;
+        // Refus ou échec : la sauvegarde d'avant reste la référence (les scripts remettent l'origine).
+        saved.applied = prev;
+        let ok_verified = res.as_ref().map(|a| a.verified).ok();
+        if let Ok(applied) = &res {
+            saved.applied = Some(applied.clone());
+        }
+        // État enregistré tout de suite, avant l'envoi à l'espace (qui peut prendre 20 s).
+        save_bouclier(&app, &saved);
         match res {
-            Ok(applied) => {
-                let verified = applied.verified;
-                saved.applied = Some(applied);
+            Ok(_) => {
+                let verified = ok_verified.unwrap_or(false);
                 if verified {
                     let _ = report_bouclier(&app, "actif", None).await;
                     message = "Bouclier actif sur ce poste.".to_string();
