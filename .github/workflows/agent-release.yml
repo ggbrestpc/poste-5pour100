@@ -66,8 +66,10 @@ jobs:
           # Windows : configurer un certificat de signature de code.
         with:
           projectPath: agent
-          tagName: ${{ github.ref_type == 'tag' && github.ref_name || format('agent-v{0}', github.run_number) }}
-          releaseName: "Agent Poste 5pour100 ${{ github.ref_type == 'tag' && github.ref_name || github.run_number }}"
+          # Lancé à la main : tag nommé d'après la version de tauri.conf.json (ex. agent-v0.6.2), pour que
+          # /telecharger affiche la vraie version. tauri-action remplace __VERSION__.
+          tagName: ${{ github.ref_type == 'tag' && github.ref_name || 'agent-v__VERSION__' }}
+          releaseName: "Agent Poste 5pour100 ${{ github.ref_type == 'tag' && github.ref_name || 'v__VERSION__' }}"
           releaseBody: "Installeurs de l'agent de bureau. Après installation, saisissez le code d'appairage depuis votre espace (Agent de bureau → Appairer un poste)."
           releaseDraft: true
           prerelease: false
