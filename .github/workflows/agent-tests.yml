@@ -1,0 +1,35 @@
+name: Agent de bureau — tests
+
+# Vérifie chaque PR et chaque push sur main : compilation et tests unitaires (Linux seulement,
+# les installeurs des 3 systèmes restent produits par « Agent de bureau — installeurs »).
+on:
+  pull_request:
+    paths: ["agent/**", ".github/workflows/agent-tests.yml"]
+  push:
+    branches: [main]
+    paths: ["agent/**"]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 20
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: agent/src-tauri -> target
+      - name: Dépendances Linux (WebKitGTK, tray)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev libssl-dev libgtk-3-dev build-essential
+      - name: Icônes (nécessaires à la compilation)
+        run: npx --yes @tauri-apps/cli@^2 icon agent/logo.png --output agent/src-tauri/icons
+      - name: Tests
+        working-directory: agent/src-tauri
+        run: cargo test

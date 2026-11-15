@@ -23,6 +23,19 @@ use tokio::sync::Mutex;
 
 const DEFAULT_SERVER: &str = "https://my.5pour100.fr";
 const POLL_SECONDS: u64 = 5;
+/// Attente maximale entre deux tentatives quand le serveur est injoignable.
+const MAX_BACKOFF_SECONDS: u64 = 60;
+/// Intervalle entre deux recherches de mise à jour (l'agent reste souvent allumé des semaines).
+const UPDATE_EVERY_SECONDS: u64 = 6 * 3600;
+
+/// Attente avant la prochaine synchro : 5 s en temps normal, puis 10, 20, 40, 60 s après des
+/// échecs successifs (serveur injoignable), pour ne pas marteler le réseau ni le serveur.
+fn next_delay(failures: u32) -> u64 {
+    if failures == 0 {
+        return POLL_SECONDS;
+    }
+    POLL_SECONDS.saturating_mul(1u64 << failures.min(10)).min(MAX_BACKOFF_SECONDS)
+}
 
 #[derive(Serialize, Deserialize, Clone)]
 struct Config {
@@ -62,24 +75,102 @@ fn platform() -> &'static str {
     }
 }
 
-/// Télécharge (champ `url`) ou décode (`base64`/`dataBase64`) le contenu d'une tâche vers un fichier
-/// temporaire. Une URL relative est complétée avec le serveur et authentifiée par le jeton.
+/// Adresse envoyée par le serveur : chemin interne (« /… ») ou adresse externe (« https://… »).
+#[derive(Debug, PartialEq)]
+enum Target {
+    /// Page ou fichier du serveur de l'espace : seule cible qui reçoit le jeton du poste.
+    Internal(String),
+    /// Adresse externe : jamais de jeton.
+    External(String),
+}
+
+/// Interprète une adresse reçue dans une tâche. Un chemin interne doit commencer par un seul « / » :
+/// on refuse « //hôte », « @hôte », « .hôte »… qui, collés derrière l'adresse du serveur, pourraient
+/// désigner un autre hôte et lui envoyer le jeton du poste. Le résultat interne est revérifié : même
+/// schéma, même hôte et même port que le serveur. Les autres schémas (file:, javascript:…) sont refusés.
+fn resolve_target(server: &str, raw: &str) -> Option<Target> {
+    let raw = raw.trim();
+    if raw.starts_with("https://") || raw.starts_with("http://") {
+        let u = url::Url::parse(raw).ok()?;
+        return Some(Target::External(u.to_string()));
+    }
+    if !raw.starts_with('/') || raw.starts_with("//") || raw.contains('\\') {
+        return None;
+    }
+    let base = url::Url::parse(server.trim_end_matches('/')).ok()?;
+    let full = url::Url::parse(&format!("{}{}", server.trim_end_matches('/'), raw)).ok()?;
+    let same = full.scheme() == base.scheme()
+        && full.host_str() == base.host_str()
+        && full.port_or_known_default() == base.port_or_known_default();
+    if same { Some(Target::Internal(full.to_string())) } else { None }
+}
+
+/// Adresse complète à ouvrir (navigateur ou fenêtre), ou None si l'adresse est refusée.
+fn target_url(server: &str, raw: &str) -> Option<String> {
+    match resolve_target(server, raw)? {
+        Target::Internal(u) | Target::External(u) => Some(u),
+    }
+}
+
+/// Nom de fichier sûr : lettres, chiffres, « . - _ » et espaces, sans « .. » ni point initial.
+fn safe_file_name(name: &str, default_name: &str) -> String {
+    let safe: String = name
+        .chars()
+        .filter(|c| c.is_alphanumeric() || matches!(c, '.' | '-' | '_' | ' '))
+        .collect();
+    let safe = safe.replace("..", ".");
+    let safe = safe.trim().trim_start_matches('.').trim().to_string();
+    if safe.is_empty() { default_name.to_string() } else { safe }
+}
+
+/// Chemin libre dans `dir` : « billet.pdf », sinon « billet (2).pdf », « billet (3).pdf »…
+/// Un fichier reçu n'écrase jamais un fichier précédent.
+fn unique_path(dir: &Path, name: &str) -> PathBuf {
+    let first = dir.join(name);
+    if !first.exists() {
+        return first;
+    }
+    let p = Path::new(name);
+    let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or(name);
+    let ext = p.extension().and_then(|s| s.to_str());
+    for i in 2..10_000 {
+        let candidate = match ext {
+            Some(e) => format!("{stem} ({i}).{e}"),
+            None => format!("{stem} ({i})"),
+        };
+        let path = dir.join(candidate);
+        if !path.exists() {
+            return path;
+        }
+    }
+    first
+}
+
+/// Dossier des fichiers reçus : « Téléchargements/5pour100 » de l'utilisateur (privé, facile à
+/// retrouver), sinon le dossier de données de l'agent. Plus le dossier temporaire partagé.
+fn received_dir(app: &AppHandle) -> PathBuf {
+    let dir = app
+        .path()
+        .download_dir()
+        .map(|d| d.join("5pour100"))
+        .or_else(|_| app.path().app_data_dir().map(|d| d.join("fichiers-recus")))
+        .unwrap_or_else(|_| std::env::temp_dir().join("poste-5pour100"));
+    let _ = std::fs::create_dir_all(&dir);
+    dir
+}
+
+/// Télécharge (champ `url`) ou décode (`base64`/`dataBase64`) le contenu d'une tâche vers le dossier
+/// des fichiers reçus. Un chemin interne est complété avec le serveur et authentifié par le jeton.
 async fn fetch_payload_file(
     client: &reqwest::Client,
     payload: &serde_json::Value,
     token: &str,
     server: &str,
+    dir: &Path,
     default_name: &str,
 ) -> Option<PathBuf> {
     let name = payload.get("name").and_then(|v| v.as_str()).unwrap_or(default_name);
-    let safe: String = name
-        .chars()
-        .filter(|c| c.is_alphanumeric() || matches!(c, '.' | '-' | '_' | ' '))
-        .collect();
-    let safe = if safe.trim().is_empty() { default_name.to_string() } else { safe };
-    let dir = std::env::temp_dir().join("poste-5pour100");
-    let _ = std::fs::create_dir_all(&dir);
-    let path = dir.join(&safe);
+    let path = unique_path(dir, &safe_file_name(name, default_name));
 
     if let Some(b64) = payload
         .get("base64")
@@ -91,12 +182,11 @@ async fn fetch_payload_file(
         return Some(path);
     }
     if let Some(url) = payload.get("url").and_then(|v| v.as_str()) {
-        let internal = !url.starts_with("http");
-        let full = if internal { format!("{}{}", server.trim_end_matches('/'), url) } else { url.to_string() };
-        let mut req = client.get(&full).timeout(Duration::from_secs(30));
-        if internal {
-            req = req.bearer_auth(token);
-        }
+        let mut req = match resolve_target(server, url)? {
+            Target::Internal(full) => client.get(full).bearer_auth(token),
+            Target::External(full) => client.get(full),
+        };
+        req = req.timeout(Duration::from_secs(30));
         let resp = req.send().await.ok()?;
         if !resp.status().is_success() {
             return None;
@@ -141,6 +231,10 @@ fn open_url(url: &str) {
 /// Impression : tente une impression directe, sinon ouvre le fichier pour impression manuelle.
 /// Renvoie true si une impression directe a pu être lancée.
 fn print_file(path: &Path) -> bool {
+    // Jamais d'impression (ni d'ouverture) d'un exécutable ou d'un script, même reçu du serveur.
+    if !ext_allowed(path) {
+        return false;
+    }
     let p = path.to_string_lossy().to_string();
     #[cfg(target_os = "windows")]
     {
@@ -280,10 +374,8 @@ fn set_autostart(app: AppHandle, enable: bool) -> Result<(), String> {
 
 /// Ouvre le dossier où l'agent dépose les fichiers reçus (billets, partages).
 #[tauri::command]
-fn open_received_folder() {
-    let dir = std::env::temp_dir().join("poste-5pour100");
-    let _ = std::fs::create_dir_all(&dir);
-    open_path(&dir);
+fn open_received_folder(app: AppHandle) {
+    open_path(&received_dir(&app));
 }
 
 /// Ouvre l'écran d'état de l'espace (tableau de bord) dans le navigateur, pour l'afficher sur une TV.
@@ -610,14 +702,15 @@ fn emit_status(app: &AppHandle, connected: bool, last_action: &str, jobs_total: 
 /// Boucle de fond : synchronise les tâches tant qu'un jeton est présent.
 async fn sync_loop(app: AppHandle, state: Arc<Mutex<Vec<serde_json::Value>>>) {
     let client = reqwest::Client::new();
-    let mut ticker = tokio::time::interval(Duration::from_secs(POLL_SECONDS));
     let mut jobs_total: u64 = 0;
+    // Échecs réseau consécutifs : allongent l'attente entre deux tentatives.
+    let mut failures: u32 = 0;
     // Supports de classe déjà téléchargés (évite de les reprendre à chaque cycle).
     let mut classe_seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     // Tâches déjà exécutées (idempotence), persistées entre les redémarrages.
     let mut processed: Vec<String> = load_processed(&app);
     loop {
-        ticker.tick().await;
+        tokio::time::sleep(Duration::from_secs(next_delay(failures))).await;
         let c = load_config(&app);
         let (server, token) = match c.token {
             Some(t) => (c.server_url, t),
@@ -641,10 +734,13 @@ async fn sync_loop(app: AppHandle, state: Arc<Mutex<Vec<serde_json::Value>>>) {
                 // Réseau indisponible : on remet les acquittements en file pour réessayer.
                 let mut guard = state.lock().await;
                 guard.splice(0..0, done);
-                emit_status(&app, false, "Hors ligne — nouvelle tentative…", jobs_total);
+                failures = failures.saturating_add(1);
+                let wait = next_delay(failures);
+                emit_status(&app, false, &format!("Hors ligne — nouvelle tentative dans {wait} s"), jobs_total);
                 continue;
             }
         };
+        failures = 0;
         if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
             // Poste révoqué : on efface le jeton local (et la session utilisateur liée au poste).
             lea_forget(&app);
@@ -706,7 +802,7 @@ async fn sync_loop(app: AppHandle, state: Arc<Mutex<Vec<serde_json::Value>>>) {
                         acks.push(json!({ "jobId": id, "result": { "ok": true } }));
                     }
                     "impression_billet" => {
-                        match fetch_payload_file(&client, &payload, &token, &server, "billet.pdf").await {
+                        match fetch_payload_file(&client, &payload, &token, &server, &received_dir(&app), "billet.pdf").await {
                             Some(path) => {
                                 let printed = print_file(&path);
                                 let msg = if printed { "Billet envoyé à l'imprimante." } else { "Billet ouvert, prêt à imprimer." };
@@ -717,7 +813,7 @@ async fn sync_loop(app: AppHandle, state: Arc<Mutex<Vec<serde_json::Value>>>) {
                         }
                     }
                     "partage_fichier" => {
-                        match fetch_payload_file(&client, &payload, &token, &server, "fichier").await {
+                        match fetch_payload_file(&client, &payload, &token, &server, &received_dir(&app), "fichier").await {
                             Some(path) => {
                                 if open_path(&path) {
                                     let _ = app.notification().builder().title("5pour100 — fichier").body("Fichier reçu et ouvert.").show();
@@ -733,11 +829,13 @@ async fn sync_loop(app: AppHandle, state: Arc<Mutex<Vec<serde_json::Value>>>) {
                     "emargement" => {
                         // Ouvre la feuille d'émargement (web) sur ce poste.
                         match payload.get("url").and_then(|v| v.as_str()) {
-                            Some(url) => {
-                                let full = if url.starts_with("http") { url.to_string() } else { format!("{}{}", server.trim_end_matches('/'), url) };
-                                open_url(&full);
-                                acks.push(json!({ "jobId": id, "result": { "ok": true } }));
-                            }
+                            Some(url) => match target_url(&server, url) {
+                                Some(full) => {
+                                    open_url(&full);
+                                    acks.push(json!({ "jobId": id, "result": { "ok": true } }));
+                                }
+                                None => acks.push(json!({ "jobId": id, "error": "adresse d'émargement refusée" })),
+                            },
                             None => acks.push(json!({ "jobId": id, "error": "url d'émargement manquante" })),
                         }
                     }
@@ -752,11 +850,13 @@ async fn sync_loop(app: AppHandle, state: Arc<Mutex<Vec<serde_json::Value>>>) {
                             if u.is_empty() {
                                 acks.push(json!({ "jobId": id, "error": "url de la séance manquante" }));
                             } else {
-                                let full = if u.starts_with("http") { u.to_string() } else { format!("{}{}", server.trim_end_matches('/'), u) };
                                 let notes = payload.get("notes").and_then(|v| v.as_bool()).unwrap_or(true);
-                                match open_locked(&app, &full, notes) {
-                                    Ok(_) => acks.push(json!({ "jobId": id, "result": { "ok": true } })),
-                                    Err(e) => acks.push(json!({ "jobId": id, "error": e })),
+                                match target_url(&server, u) {
+                                    Some(full) => match open_locked(&app, &full, notes) {
+                                        Ok(_) => acks.push(json!({ "jobId": id, "result": { "ok": true } })),
+                                        Err(e) => acks.push(json!({ "jobId": id, "error": e })),
+                                    },
+                                    None => acks.push(json!({ "jobId": id, "error": "adresse de la séance refusée" })),
                                 }
                             }
                         }
@@ -765,9 +865,13 @@ async fn sync_loop(app: AppHandle, state: Arc<Mutex<Vec<serde_json::Value>>>) {
                         // Affiche une page en plein écran sur l'écran du poste (TV d'accueil/salle).
                         // payload.url : adresse interne (/ecran) ou externe. Défaut : écran d'état.
                         let u = payload.get("url").and_then(|v| v.as_str()).unwrap_or("/ecran");
-                        let full = if u.starts_with("http") { u.to_string() } else { format!("{}{}", server.trim_end_matches('/'), u) };
-                        open_url(&full);
-                        acks.push(json!({ "jobId": id, "result": { "ok": true } }));
+                        match target_url(&server, u) {
+                            Some(full) => {
+                                open_url(&full);
+                                acks.push(json!({ "jobId": id, "result": { "ok": true } }));
+                            }
+                            None => acks.push(json!({ "jobId": id, "error": "adresse d'affichage refusée" })),
+                        }
                     }
                     other => {
                         acks.push(json!({ "jobId": id, "error": format!("type « {other} » non pris en charge par cette version de l'agent") }));
@@ -814,7 +918,7 @@ async fn sync_loop(app: AppHandle, state: Arc<Mutex<Vec<serde_json::Value>>>) {
                             if let Ok(r) = got {
                                 if let Ok(fb) = r.json::<serde_json::Value>().await {
                                     // fetch_payload_file décode le champ dataBase64 vers le dossier des fichiers reçus.
-                                    if let Some(path) = fetch_payload_file(&client, &fb, &token, &server, "support").await {
+                                    if let Some(path) = fetch_payload_file(&client, &fb, &token, &server, &received_dir(&app), "support").await {
                                         if open_path(&path) {
                                             let _ = app
                                                 .notification()
@@ -840,14 +944,30 @@ async fn sync_loop(app: AppHandle, state: Arc<Mutex<Vec<serde_json::Value>>>) {
     }
 }
 
+/// Recherche une mise à jour au démarrage puis toutes les 6 heures : un poste allumé en continu
+/// (démarrage automatique) se met ainsi à jour sans attendre un redémarrage.
+async fn update_loop(app: AppHandle) {
+    loop {
+        check_update(&app).await;
+        tokio::time::sleep(Duration::from_secs(UPDATE_EVERY_SECONDS)).await;
+    }
+}
+
 /// Vérifie et installe une mise à jour si disponible, puis relance l'agent. Silencieux et tolérant :
-/// toute erreur (pas de clé updater, hors ligne, aucune release) est ignorée.
-async fn check_update(app: AppHandle) {
+/// toute erreur (pas de clé updater, hors ligne, aucune release) est ignorée. Jamais pendant une
+/// séance guidée : la relance fermerait la fenêtre de l'élève ; on réessaie au cycle suivant.
+async fn check_update(app: &AppHandle) {
+    if app.get_webview_window("diffusion").is_some() {
+        return;
+    }
     let updater = match app.updater() {
         Ok(u) => u,
         Err(_) => return,
     };
     if let Ok(Some(update)) = updater.check().await {
+        if app.get_webview_window("diffusion").is_some() {
+            return;
+        }
         let _ = app
             .notification()
             .builder()
@@ -937,14 +1057,83 @@ fn main() {
                 sync_loop(handle, acks).await;
             });
 
-            // Mise à jour automatique au démarrage (silencieuse). Inactive tant que la clé « updater »
-            // (plugins.updater.pubkey) n'est pas renseignée : check() échoue alors et on ne fait rien.
+            // Mise à jour automatique (silencieuse) au démarrage puis toutes les 6 heures.
             let up = app.handle().clone();
             tauri::async_runtime::spawn(async move {
-                check_update(up).await;
+                update_loop(up).await;
             });
             Ok(())
         })
         .run(tauri::generate_context!())
         .expect("échec du lancement de l'agent Poste 5pour100");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const S: &str = "https://my.5pour100.fr";
+
+    #[test]
+    fn chemin_interne_garde_le_serveur() {
+        assert_eq!(
+            resolve_target(S, "/api/agent/billet/1.pdf"),
+            Some(Target::Internal("https://my.5pour100.fr/api/agent/billet/1.pdf".into()))
+        );
+    }
+
+    #[test]
+    fn chemin_piege_refuse() {
+        // Collés derrière le serveur, ces chemins visaient un autre hôte avec le jeton du poste.
+        for raw in ["@evil.example/x", ".evil.example/x", "//evil.example/x", "evil.example/x", "/\\evil.example", "file:///etc/passwd", "javascript:alert(1)", ""] {
+            assert_eq!(resolve_target(S, raw), None, "{raw}");
+        }
+    }
+
+    #[test]
+    fn serveur_avec_port() {
+        assert_eq!(
+            resolve_target("http://localhost:3000/", "/ecran"),
+            Some(Target::Internal("http://localhost:3000/ecran".into()))
+        );
+    }
+
+    #[test]
+    fn adresse_externe_sans_jeton() {
+        assert_eq!(
+            resolve_target(S, "https://exemple.fr/billet.pdf"),
+            Some(Target::External("https://exemple.fr/billet.pdf".into()))
+        );
+    }
+
+    #[test]
+    fn nom_de_fichier_nettoye() {
+        assert_eq!(safe_file_name("../../.bashrc", "f"), "bashrc");
+        assert_eq!(safe_file_name("Billet n°12.pdf", "f"), "Billet n12.pdf");
+        assert_eq!(safe_file_name("///", "billet.pdf"), "billet.pdf");
+    }
+
+    #[test]
+    fn fichier_jamais_ecrase() {
+        let dir = std::env::temp_dir().join(format!("poste-test-{}", now_ms()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let a = unique_path(&dir, "billet.pdf");
+        std::fs::write(&a, b"1").unwrap();
+        let b = unique_path(&dir, "billet.pdf");
+        assert_eq!(b.file_name().unwrap(), "billet (2).pdf");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn attente_progressive_hors_ligne() {
+        let seq: Vec<u64> = (0..7).map(next_delay).collect();
+        assert_eq!(seq, vec![5, 10, 20, 40, 60, 60, 60]);
+        assert_eq!(next_delay(u32::MAX), 60);
+    }
+
+    #[test]
+    fn executable_jamais_imprime() {
+        assert!(!print_file(Path::new("/tmp/x.exe")));
+        assert!(!print_file(Path::new("/tmp/script.sh")));
+    }
 }
