@@ -31,18 +31,58 @@ pub fn updates_check(days: Option<u64>) -> Check {
     }
 }
 
-/// Lance une commande en lecture et renvoie sa sortie (stdout + stderr), ou None (absente, erreur).
+/// Délai maximal d'une commande du bilan : au-delà, elle est tuée (jamais de processus qui traîne).
+const COMMAND_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// Lance une commande en lecture et renvoie sa sortie (stdout + stderr), ou None (absente, erreur,
+/// ou délai dépassé : le processus est alors tué et récupéré avant de rendre la main).
 fn run(cmd: &str, args: &[&str]) -> Option<String> {
+    run_with_timeout(cmd, args, COMMAND_TIMEOUT)
+}
+
+fn run_with_timeout(cmd: &str, args: &[&str], timeout: Duration) -> Option<String> {
+    use std::io::Read;
+    use std::process::Stdio;
     let mut c = Command::new(cmd);
-    c.args(args);
+    c.args(args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     #[cfg(target_os = "windows")]
     {
         use std::os::windows::process::CommandExt;
         c.creation_flags(0x0800_0000); // CREATE_NO_WINDOW : pas de fenêtre console qui clignote
     }
-    let out = c.output().ok()?;
-    let mut s = String::from_utf8_lossy(&out.stdout).to_string();
-    s.push_str(&String::from_utf8_lossy(&out.stderr));
+    let mut child = c.spawn().ok()?;
+    // Lecture des sorties dans des fils dédiés : un tampon plein ne peut pas bloquer la commande.
+    let mut out = child.stdout.take()?;
+    let mut err = child.stderr.take()?;
+    let t_out = std::thread::spawn(move || {
+        let mut b = Vec::new();
+        let _ = out.read_to_end(&mut b);
+        b
+    });
+    let t_err = std::thread::spawn(move || {
+        let mut b = Vec::new();
+        let _ = err.read_to_end(&mut b);
+        b
+    });
+    let deadline = std::time::Instant::now() + timeout;
+    let finished = loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break true,
+            Ok(None) if std::time::Instant::now() < deadline => std::thread::sleep(Duration::from_millis(50)),
+            _ => break false,
+        }
+    };
+    if !finished {
+        let _ = child.kill();
+        let _ = child.wait();
+        // Les fils de lecture se terminent d'eux-mêmes à la fermeture des tubes ; on ne les attend pas
+        // (un sous-processus petit-enfant pourrait garder le tube ouvert).
+        return None;
+    }
+    let stdout = t_out.join().unwrap_or_default();
+    let stderr = t_err.join().unwrap_or_default();
+    let mut s = String::from_utf8_lossy(&stdout).to_string();
+    s.push_str(&String::from_utf8_lossy(&stderr));
     Some(s)
 }
 
@@ -147,7 +187,8 @@ pub fn parse_macos(o: &MacOutputs) -> Vec<Check> {
 /* -------------------------------- Linux -------------------------------- */
 
 pub struct LinuxOutputs<'a> {
-    pub lsblk_types: Option<&'a str>,
+    /// Types des périphériques sous la racine « / » (lsblk -s : la partition et ses parents).
+    pub root_chain_types: Option<&'a str>,
     pub ufw_conf: Option<&'a str>,
     pub firewalld_active: bool,
     pub lock_enabled: Option<&'a str>,
@@ -156,9 +197,10 @@ pub struct LinuxOutputs<'a> {
 
 pub fn parse_linux(o: &LinuxOutputs) -> Vec<Check> {
     let mut v = Vec::new();
-    v.push(match o.lsblk_types {
-        Some(s) if s.lines().any(|l| l.trim() == "crypt") => check("chiffrement", "ok", "disque chiffré (LUKS)"),
-        Some(s) if !s.trim().is_empty() => check("chiffrement", "alerte", "aucun volume chiffré détecté"),
+    // Seule compte la chaîne qui porte « / » : un swap ou une clé USB chiffrés ne protègent pas le système.
+    v.push(match o.root_chain_types {
+        Some(s) if s.lines().any(|l| l.trim() == "crypt") => check("chiffrement", "ok", "partition système chiffrée (LUKS)"),
+        Some(s) if !s.trim().is_empty() => check("chiffrement", "alerte", "partition système non chiffrée"),
         _ => check("chiffrement", "inconnu", ""),
     });
     let ufw_on = o.ufw_conf.map(|c| c.lines().any(|l| l.trim() == "ENABLED=yes")).unwrap_or(false);
@@ -193,8 +235,10 @@ pub fn collect() -> (Vec<Check>, String) {
         let fw = run("/usr/libexec/ApplicationFirewall/socketfilterfw", &["--getglobalstate"]);
         let gk = run("spctl", &["--status"]);
         let sl = run("sysadminctl", &["-screenLock", "status"]);
-        let last = run("defaults", &["read", "/Library/Preferences/com.apple.SoftwareUpdate", "LastFullSuccessfulDate"]);
-        let update_days = last.as_deref().and_then(parse_mac_date).and_then(days_since);
+        // Dernière mise à jour INSTALLÉE par softwareupdated (historique des installations), et non la
+        // dernière recherche réussie : un Mac qui cherche sans installer doit rester en alerte.
+        let history = run("plutil", &["-convert", "json", "-o", "-", "/Library/Receipts/InstallHistory.plist"]);
+        let update_days = history.as_deref().and_then(last_mac_system_update).and_then(days_since);
         let checks = parse_macos(&MacOutputs {
             filevault: fv.as_deref(),
             firewall: fw.as_deref(),
@@ -207,7 +251,11 @@ pub fn collect() -> (Vec<Check>, String) {
     }
     #[cfg(target_os = "linux")]
     {
-        let lsblk = run("lsblk", &["-rno", "TYPE"]);
+        // Source de « / » (sans le sous-volume btrfs « [/@] »), puis ses périphériques parents.
+        let root_src = run("findmnt", &["-no", "SOURCE", "/"])
+            .map(|s| s.lines().next().unwrap_or("").split('[').next().unwrap_or("").trim().to_string())
+            .filter(|s| s.starts_with("/dev/"));
+        let lsblk = root_src.as_deref().and_then(|src| run("lsblk", &["-rnso", "TYPE", src]));
         let ufw = std::fs::read_to_string("/etc/ufw/ufw.conf").ok();
         let firewalld = run("systemctl", &["is-active", "firewalld"]).map(|s| s.trim() == "active").unwrap_or(false);
         let lock = run("gsettings", &["get", "org.gnome.desktop.screensaver", "lock-enabled"]);
@@ -217,7 +265,7 @@ pub fn collect() -> (Vec<Check>, String) {
             .find_map(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok())
             .and_then(days_since);
         let checks = parse_linux(&LinuxOutputs {
-            lsblk_types: lsblk.as_deref(),
+            root_chain_types: lsblk.as_deref(),
             ufw_conf: ufw.as_deref(),
             firewalld_active: firewalld,
             lock_enabled: lock.as_deref(),
@@ -233,7 +281,19 @@ pub fn collect() -> (Vec<Check>, String) {
     (Vec::new(), String::new())
 }
 
-/// « 2026-11-02 08:15:00 +0000 » (sortie de defaults) → instant.
+/// Date de la dernière installation faite par la mise à jour du système (« softwareupdated »), lue
+/// dans InstallHistory.plist converti en JSON.
+#[allow(dead_code)]
+fn last_mac_system_update(json: &str) -> Option<SystemTime> {
+    let items: Vec<serde_json::Value> = serde_json::from_str(json).ok()?;
+    items
+        .iter()
+        .filter(|i| i.get("processName").and_then(|p| p.as_str()) == Some("softwareupdated"))
+        .filter_map(|i| i.get("date").and_then(|d| d.as_str()).and_then(parse_mac_date))
+        .max()
+}
+
+/// « 2026-11-02T08:15:00Z » ou « 2026-11-02 08:15:00 +0000 » → instant (au jour près).
 #[allow(dead_code)]
 fn parse_mac_date(s: &str) -> Option<SystemTime> {
     let d = s.trim().get(0..10)?;
@@ -292,7 +352,7 @@ mod tests {
     #[test]
     fn linux() {
         let c = parse_linux(&LinuxOutputs {
-            lsblk_types: Some("disk\npart\npart\ncrypt\nlvm\n"),
+            root_chain_types: Some("lvm\ncrypt\npart\ndisk\n"),
             ufw_conf: Some("# commentaire\nENABLED=no\n"),
             firewalld_active: false,
             lock_enabled: Some("true\n"),
@@ -300,6 +360,43 @@ mod tests {
         });
         let st: Vec<_> = c.iter().map(|x| (x.id, x.status)).collect();
         assert_eq!(st, vec![("chiffrement", "ok"), ("pare_feu", "alerte"), ("verrouillage", "ok"), ("mises_a_jour", "inconnu")]);
+    }
+
+    #[test]
+    fn linux_racine_non_chiffree_malgre_un_swap_chiffre() {
+        // La chaîne de « / » ne contient pas « crypt » : alerte, même si un autre volume est chiffré.
+        let c = parse_linux(&LinuxOutputs {
+            root_chain_types: Some("part\ndisk\n"),
+            ufw_conf: Some("ENABLED=yes\n"),
+            firewalld_active: false,
+            lock_enabled: None,
+            update_days: Some(2),
+        });
+        assert_eq!(c[0].status, "alerte");
+        assert_eq!(c[1].status, "ok");
+    }
+
+    #[test]
+    fn mac_derniere_installation_systeme() {
+        let json = r#"[
+            {"date":"2026-10-01T10:00:00Z","processName":"softwareupdated","displayName":"macOS 26.1"},
+            {"date":"2026-11-10T10:00:00Z","processName":"App Store","displayName":"Pages"},
+            {"date":"2026-09-01T10:00:00Z","processName":"softwareupdated","displayName":"XProtect"}
+        ]"#;
+        let t = last_mac_system_update(json).unwrap();
+        assert_eq!(t, parse_mac_date("2026-10-01").unwrap());
+        assert!(last_mac_system_update("[]").is_none());
+    }
+
+    #[test]
+    fn commande_trop_longue_tuee() {
+        #[cfg(unix)]
+        {
+            let start = std::time::Instant::now();
+            assert!(run_with_timeout("sleep", &["30"], Duration::from_millis(300)).is_none());
+            assert!(start.elapsed() < Duration::from_secs(5));
+            assert_eq!(run_with_timeout("echo", &["bonjour"], Duration::from_secs(5)).as_deref(), Some("bonjour\n"));
+        }
     }
 
     #[test]

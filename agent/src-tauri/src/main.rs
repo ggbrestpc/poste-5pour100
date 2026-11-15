@@ -1041,13 +1041,11 @@ async fn sync_loop(app: AppHandle, state: Arc<Mutex<Vec<serde_json::Value>>>) {
 /// Intervalle entre deux bilans de sécurité envoyés à l'espace.
 const POSTURE_EVERY_SECONDS: u64 = 24 * 3600;
 
-/// Fait le bilan de sécurité du poste (lecture seule, 90 s maximum) et l'envoie à l'espace si le
-/// poste est relié. Le bilan est aussi affiché dans la fenêtre de l'agent (évènement « posture »).
+/// Fait le bilan de sécurité du poste (lecture seule ; chaque commande est tuée après 20 s) et
+/// l'envoie à l'espace si le poste est relié. Le bilan est aussi affiché dans la fenêtre de l'agent
+/// (évènement « posture »).
 async fn report_posture(app: &AppHandle) -> Result<serde_json::Value, String> {
-    let collected = tokio::time::timeout(Duration::from_secs(90), tauri::async_runtime::spawn_blocking(posture::collect))
-        .await
-        .map_err(|_| "bilan trop long, abandonné".to_string())?
-        .map_err(|e| e.to_string())?;
+    let collected = tauri::async_runtime::spawn_blocking(posture::collect).await.map_err(|e| e.to_string())?;
     let (checks, os) = collected;
     let body = json!({ "agentVersion": env!("CARGO_PKG_VERSION"), "os": os, "checks": checks });
     let _ = app.emit("posture", body.clone());
