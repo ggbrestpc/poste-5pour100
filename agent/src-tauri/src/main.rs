@@ -4,6 +4,8 @@
 // Le jeton est stocké localement ; il ne quitte jamais la machine.
 #![cfg_attr(all(not(debug_assertions), target_os = "windows"), windows_subsystem = "windows")]
 
+mod posture;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
@@ -387,18 +389,110 @@ fn open_display(app: AppHandle) {
     open_url(&url);
 }
 
-/// Ouvre l'espace 5pour100 complet (assistant Léa, gestion, quiz des élèves…) dans le navigateur
-/// par défaut. On évite une webview intégrée (page blanche / fenêtre non fermable sous Windows) :
-/// le navigateur est fiable et toujours fermable, et la session de l'utilisateur y persiste.
+/// Page ouverte par défaut dans la fenêtre de l'espace : le bureau my5 (toutes les apps, Léa).
+const SPACE_HOME: &str = "/bureau";
+
+/// Adresse interne de l'espace pour `path` (« /… » sur le serveur de l'espace), sinon le bureau.
+fn space_url(server: &str, path: Option<&str>) -> Option<String> {
+    let p = path.filter(|p| p.starts_with('/')).unwrap_or(SPACE_HOME);
+    match resolve_target(server, p)? {
+        Target::Internal(u) => Some(u),
+        Target::External(_) => None,
+    }
+}
+
+/// Vrai si `u` est sur le serveur de l'espace (même schéma, hôte et port).
+fn same_origin(u: &url::Url, server: &url::Url) -> bool {
+    u.scheme() == server.scheme()
+        && u.host_str() == server.host_str()
+        && u.port_or_known_default() == server.port_or_known_default()
+}
+
+/// Ouvre l'espace 5pour100 complet (bureau, Léa, toutes les apps) dans une fenêtre de l'application.
+/// - Commande ASYNCHRONE : sous Windows, créer une fenêtre depuis une commande synchrone bloque
+///   (c'était la cause de la page blanche impossible à fermer de la 0.2.0).
+/// - Le site n'a AUCUN accès au poste : les capacités Tauri ne sont accordées qu'à la fenêtre
+///   locale « main » (capabilities/default.json), jamais à cette fenêtre distante.
+/// - Seul le serveur de l'espace s'affiche ici ; tout autre lien part dans le navigateur.
+/// - Chaque utilisateur s'y connecte avec son propre compte : il n'y voit que ses droits.
 /// `path` facultatif (ex. "/apprendre/...") pour ouvrir directement une page.
 #[tauri::command]
-fn open_space(app: AppHandle, path: Option<String>) {
+async fn open_space(app: AppHandle, path: Option<String>) -> Result<(), String> {
     let c = load_config(&app);
-    let base = c.server_url.trim_end_matches('/').to_string();
-    let p = path.unwrap_or_default();
-    let p = if p.starts_with('/') { p } else { String::new() };
-    open_url(&format!("{base}{p}"));
+    let url = space_url(&c.server_url, path.as_deref()).ok_or("Adresse de l'espace refusée.")?;
+    open_space_window(&app, &c.server_url, &url, path.is_some())
 }
+
+/// Ouvre l'espace dans le navigateur par défaut (secours : connexion par clé d'accès, page à part).
+#[tauri::command]
+fn open_space_browser(app: AppHandle, path: Option<String>) {
+    let c = load_config(&app);
+    if let Some(url) = space_url(&c.server_url, path.as_deref()) {
+        open_url(&url);
+    }
+}
+
+fn open_space_window(app: &AppHandle, server: &str, url: &str, navigate: bool) -> Result<(), String> {
+    let target = url::Url::parse(url).map_err(|e| format!("Adresse invalide : {e}"))?;
+    if let Some(w) = app.get_webview_window("espace") {
+        if navigate {
+            let _ = w.navigate(target);
+        }
+        let _ = w.show();
+        let _ = w.unminimize();
+        let _ = w.set_focus();
+        return Ok(());
+    }
+    let origin = url::Url::parse(server).map_err(|e| format!("Adresse du serveur invalide : {e}"))?;
+    let nav_origin = origin.clone();
+    let win_origin = origin.clone();
+    let downloads = received_dir(app);
+    WebviewWindowBuilder::new(app, "espace", WebviewUrl::External(target))
+        .title("Mon espace 5pour100")
+        .inner_size(1280.0, 820.0)
+        .min_inner_size(800.0, 560.0)
+        .on_navigation(move |u| {
+            if same_origin(u, &nav_origin) || matches!(u.scheme(), "about" | "blob" | "data") {
+                return true;
+            }
+            // Paiement, documentation, sites externes : dans le navigateur, jamais dans l'application.
+            open_url(u.as_str());
+            false
+        })
+        .on_new_window(move |u, _features| {
+            // Liens « nouvel onglet » : la page de l'espace s'ouvre ici, le reste dans le navigateur.
+            if !same_origin(&u, &win_origin) {
+                open_url(u.as_str());
+            } else if let Some(w) = APP_HANDLE.get().and_then(|a| a.get_webview_window("espace")) {
+                let _ = w.navigate(u);
+            }
+            tauri::webview::NewWindowResponse::Deny
+        })
+        .on_download(move |_webview, event| {
+            if let tauri::webview::DownloadEvent::Requested { url, destination } = event {
+                // Téléchargements de l'espace (factures, exports…) : dans Téléchargements/5pour100,
+                // sans écraser un fichier existant ; jamais d'exécutable.
+                let name = destination
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .map(str::to_string)
+                    .or_else(|| url.path_segments().and_then(|mut s| s.next_back()).map(str::to_string))
+                    .unwrap_or_default();
+                let path = unique_path(&downloads, &safe_file_name(&name, "document"));
+                if !ext_allowed(&path) {
+                    return false;
+                }
+                *destination = path;
+            }
+            true
+        })
+        .build()
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Accès global à l'application pour les rappels de fenêtre qui n'en reçoivent pas.
+static APP_HANDLE: std::sync::OnceLock<AppHandle> = std::sync::OnceLock::new();
 
 /// Connexion d'un utilisateur sur ce poste pour obtenir la vraie Léa. Stocke le jeton de session.
 /// Renvoie le nom de l'utilisateur. Erreur « 2FA_REQUIS » si un code de validation est attendu.
@@ -944,6 +1038,50 @@ async fn sync_loop(app: AppHandle, state: Arc<Mutex<Vec<serde_json::Value>>>) {
     }
 }
 
+/// Intervalle entre deux bilans de sécurité envoyés à l'espace.
+const POSTURE_EVERY_SECONDS: u64 = 24 * 3600;
+
+/// Fait le bilan de sécurité du poste (lecture seule ; chaque commande est tuée après 20 s) et
+/// l'envoie à l'espace si le poste est relié. Le bilan est aussi affiché dans la fenêtre de l'agent
+/// (évènement « posture »).
+async fn report_posture(app: &AppHandle) -> Result<serde_json::Value, String> {
+    let collected = tauri::async_runtime::spawn_blocking(posture::collect).await.map_err(|e| e.to_string())?;
+    let (checks, os) = collected;
+    let body = json!({ "agentVersion": env!("CARGO_PKG_VERSION"), "os": os, "checks": checks });
+    let _ = app.emit("posture", body.clone());
+    let c = load_config(app);
+    if let Some(token) = c.token {
+        let resp = reqwest::Client::new()
+            .post(format!("{}/api/agent/securite", c.server_url.trim_end_matches('/')))
+            .bearer_auth(&token)
+            .json(&body)
+            .timeout(Duration::from_secs(20))
+            .send()
+            .await
+            .map_err(|e| format!("envoi impossible : {e}"))?;
+        // 404 : espace pas encore à jour (route absente) ; on garde le bilan local sans erreur.
+        if !resp.status().is_success() && resp.status() != reqwest::StatusCode::NOT_FOUND {
+            return Err(format!("envoi refusé ({})", resp.status()));
+        }
+    }
+    Ok(body)
+}
+
+/// Bilan au démarrage (après une minute, pour ne pas ralentir l'ouverture de session) puis chaque jour.
+async fn posture_loop(app: AppHandle) {
+    tokio::time::sleep(Duration::from_secs(60)).await;
+    loop {
+        let _ = report_posture(&app).await;
+        tokio::time::sleep(Duration::from_secs(POSTURE_EVERY_SECONDS)).await;
+    }
+}
+
+/// Bilan à la demande (bouton « Refaire le bilan » de la fenêtre de l'agent).
+#[tauri::command]
+async fn security_check(app: AppHandle) -> Result<serde_json::Value, String> {
+    report_posture(&app).await
+}
+
 /// Recherche une mise à jour au démarrage puis toutes les 6 heures : un poste allumé en continu
 /// (démarrage automatique) se met ainsi à jour sans attendre un redémarrage.
 async fn update_loop(app: AppHandle) {
@@ -1008,6 +1146,8 @@ fn main() {
             open_received_folder,
             open_display,
             open_space,
+            open_space_browser,
+            security_check,
             ask_lea,
             lea_login,
             lea_me,
@@ -1017,10 +1157,12 @@ fn main() {
         ])
         .setup(|app| {
             // Icône de barre des tâches : afficher / fermer une séance guidée / quitter.
+            let _ = APP_HANDLE.set(app.handle().clone());
             let show = MenuItem::with_id(app, "show", "Ouvrir", true, None::<&str>)?;
+            let espace = MenuItem::with_id(app, "espace", "Mon espace", true, None::<&str>)?;
             let endseance = MenuItem::with_id(app, "endseance", "Fermer la séance guidée", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "Quitter", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&show, &endseance, &quit])?;
+            let menu = Menu::with_items(app, &[&espace, &show, &endseance, &quit])?;
             let _tray = TrayIconBuilder::new()
                 .icon(app.default_window_icon().unwrap().clone())
                 .menu(&menu)
@@ -1031,6 +1173,20 @@ fn main() {
                             let _ = w.show();
                             let _ = w.set_focus();
                         }
+                    }
+                    "espace" => {
+                        let a = app.clone();
+                        tauri::async_runtime::spawn(async move {
+                            let c = load_config(&a);
+                            if c.token.is_some() {
+                                if let Some(url) = space_url(&c.server_url, None) {
+                                    let _ = open_space_window(&a, &c.server_url, &url, false);
+                                }
+                            } else if let Some(w) = a.get_webview_window("main") {
+                                let _ = w.show();
+                                let _ = w.set_focus();
+                            }
+                        });
                     }
                     // Sortie de secours locale : ferme une séance guidée restée bloquée (contenu non chargé).
                     "endseance" => close_locked(app),
@@ -1055,6 +1211,12 @@ fn main() {
             let acks = state.acks.clone();
             tauri::async_runtime::spawn(async move {
                 sync_loop(handle, acks).await;
+            });
+
+            // Bilan de sécurité du poste : une minute après le démarrage, puis chaque jour.
+            let pst = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                posture_loop(pst).await;
             });
 
             // Mise à jour automatique (silencieuse) au démarrage puis toutes les 6 heures.
@@ -1122,6 +1284,19 @@ mod tests {
         let b = unique_path(&dir, "billet.pdf");
         assert_eq!(b.file_name().unwrap(), "billet (2).pdf");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn espace_toujours_sur_le_serveur() {
+        assert_eq!(space_url(S, None).as_deref(), Some("https://my.5pour100.fr/bureau"));
+        assert_eq!(space_url(S, Some("/factures")).as_deref(), Some("https://my.5pour100.fr/factures"));
+        // Chemin invalide : on retombe sur le bureau ; chemin piégé : refusé.
+        assert_eq!(space_url(S, Some("https://ailleurs.fr")).as_deref(), Some("https://my.5pour100.fr/bureau"));
+        assert_eq!(space_url(S, Some("//ailleurs.fr/x")), None);
+        let srv = url::Url::parse(S).unwrap();
+        assert!(same_origin(&url::Url::parse("https://my.5pour100.fr/x").unwrap(), &srv));
+        assert!(!same_origin(&url::Url::parse("https://my.5pour100.fr.evil.example/").unwrap(), &srv));
+        assert!(!same_origin(&url::Url::parse("http://my.5pour100.fr/").unwrap(), &srv));
     }
 
     #[test]

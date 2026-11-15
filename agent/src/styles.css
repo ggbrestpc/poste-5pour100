@@ -90,3 +90,8 @@ details input { margin-top: 8px; width: 100%; }
 
 .foot { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: .76rem; padding-top: 4px; }
 .foot-logo { width: 18px; height: 18px; border-radius: 5px; background: linear-gradient(135deg, #3b82f6, #7c6cff); color: #fff; font-weight: 800; font-size: 11px; display: grid; place-items: center; }
+.small-note { font-size: 12px; margin-top: 6px; }
+.secu { margin: 12px 0; }
+.secu-list { list-style: none; padding: 0; margin: 8px 0; font-size: .9rem; line-height: 1.6; }
+.secu-alerte { color: #fbbf24; }
+.small-note a { color: #93c5fd; }
