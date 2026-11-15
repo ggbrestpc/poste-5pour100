@@ -459,7 +459,13 @@ async function shareFile() {
     const r = await invoke("share_file", { visibilite: $("share-vis").value });
     if (r.ok) m.textContent = `« ${r.name} » partagé ${r.visibilite === "equipe" ? "avec l'équipe" : "pour vous seulement"}.`;
   } catch (e) {
-    m.textContent = String(e);
+    if (String(e).includes("SESSION_EXPIREE")) {
+      // Session expirée ou révoquée : la section Léa repasse en « déconnecté » pour se reconnecter tout de suite.
+      m.textContent = "Votre session a expiré : reconnectez-vous dans la section Léa, puis partagez de nouveau.";
+      await onLeaExpired();
+    } else {
+      m.textContent = String(e);
+    }
   } finally {
     b.disabled = false;
   }
