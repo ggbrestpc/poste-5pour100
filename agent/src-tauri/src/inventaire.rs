@@ -38,7 +38,8 @@ pub fn parse_cups(list: &str, default_line: &str) -> Vec<Printer> {
 pub fn printers() -> Vec<Printer> {
     #[cfg(target_os = "windows")]
     {
-        let script = "Get-CimInstance Win32_Printer | ForEach-Object { \"$($_.Default)|$($_.Name)\" }";
+        // Sortie en UTF-8 : un nom accentué (« Imprimante Étage ») doit revenir intact pour PrintTo.
+        let script = "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; Get-CimInstance Win32_Printer | ForEach-Object { \"$($_.Default)|$($_.Name)\" }";
         let out = crate::posture::run_capture("powershell", &["-NoProfile", "-NonInteractive", "-Command", script], TIMEOUT)
             .map(|(_, s)| s)
             .unwrap_or_default();
