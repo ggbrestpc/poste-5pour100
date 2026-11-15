@@ -5,6 +5,7 @@
 #![cfg_attr(all(not(debug_assertions), target_os = "windows"), windows_subsystem = "windows")]
 
 mod bouclier;
+mod dossiers;
 mod inventaire;
 mod posture;
 
@@ -770,6 +771,8 @@ fn set_server(app: AppHandle, url: String) -> Result<(), String> {
 #[tauri::command]
 fn unpair(app: AppHandle) -> Result<(), String> {
     lea_forget(&app);
+    // Poste délié : les dossiers connectés sont oubliés (l'espace les coupe aussi quand il révoque le poste).
+    let _ = std::fs::remove_file(dossiers_path(&app));
     let mut c = load_config(&app);
     c.token = None;
     c.device_name = None;
@@ -1210,6 +1213,281 @@ async fn posture_loop(app: AppHandle) {
     }
 }
 
+/* ------------------------------ Dossiers connectés ------------------------------ */
+
+/// Un seul accès à la fois à dossiers.json (boucle d'envoi et commandes de l'interface).
+static DOSSIERS_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+/// Envoi toutes les minutes ; un fichier doit être stable depuis 15 s ; au plus 10 envois par dossier et par passage.
+const DOSSIERS_EVERY_SECONDS: u64 = 60;
+const DOSSIERS_SETTLE_SECONDS: u64 = 15;
+const DOSSIERS_MAX_PER_PASS: usize = 10;
+
+fn dossiers_path(app: &AppHandle) -> PathBuf {
+    config_path(app).with_file_name("dossiers.json")
+}
+
+fn load_dossiers(app: &AppHandle) -> dossiers::Saved {
+    std::fs::read_to_string(dossiers_path(app)).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()
+}
+
+fn save_dossiers(app: &AppHandle, s: &dossiers::Saved) {
+    if let Ok(txt) = serde_json::to_string_pretty(s) {
+        let _ = std::fs::write(dossiers_path(app), txt);
+    }
+}
+
+fn dossiers_view(s: &dossiers::Saved) -> serde_json::Value {
+    json!(s
+        .items
+        .iter()
+        .map(|d| json!({
+            "id": d.id,
+            "label": d.label,
+            "path": d.path.to_string_lossy(),
+            "visibilite": d.visibilite,
+            "sent": d.sent,
+            "lastError": d.last_error,
+        }))
+        .collect::<Vec<_>>())
+}
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+}
+
+#[tauri::command]
+async fn dossiers_list(app: AppHandle) -> serde_json::Value {
+    // Lecture seule, sans attendre un envoi en cours.
+    dossiers_view(&load_dossiers(&app))
+}
+
+/// Connexion d'un dossier : la personne le choisit dans la fenêtre du système. Les fichiers déjà
+/// présents ne sont pas envoyés ; seuls ceux qui arrivent ensuite le sont, à son nom.
+#[tauri::command]
+async fn dossier_connect(app: AppHandle, visibilite: String) -> Result<serde_json::Value, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let vis = if visibilite == "equipe" { "equipe" } else { "moi" };
+    let c = load_config(&app);
+    let device = c.token.ok_or("Poste non relié.")?;
+    let user = user_token_get().ok_or("Connectez-vous avec votre compte (section Léa) pour connecter un dossier à votre nom.")?;
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    app.dialog().file().set_title("Dossier à connecter à mon espace").pick_folder(move |f| {
+        let _ = tx.send(f);
+    });
+    let Some(picked) = rx.await.map_err(|_| "Fenêtre de choix fermée.".to_string())? else {
+        return Ok(json!({ "ok": false, "cancelled": true }));
+    };
+    let path = picked.into_path().map_err(|_| "Ce dossier ne peut pas être lu.".to_string())?;
+    let snap = dossiers::snapshot(&path).map_err(|e| format!("Lecture du dossier impossible : {e}"))?;
+    let label: String = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "Dossier".into()).chars().take(80).collect();
+    {
+        let _g = DOSSIERS_LOCK.lock().await;
+        if load_dossiers(&app).items.iter().any(|d| d.path == path) {
+            return Err("Ce dossier est déjà connecté.".into());
+        }
+    }
+    let resp = reqwest::Client::new()
+        .post(format!("{}/api/agent/connexions", c.server_url.trim_end_matches('/')))
+        .bearer_auth(&user)
+        .header("x-device-token", &device)
+        .json(&json!({ "label": label, "visibilite": vis }))
+        .timeout(Duration::from_secs(30))
+        .send()
+        .await
+        .map_err(|e| format!("Connexion impossible : {e}"))?;
+    if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
+        lea_forget(&app);
+        return Err(SESSION_EXPIREE.to_string());
+    }
+    if resp.status() == reqwest::StatusCode::NOT_FOUND {
+        return Err("Votre espace n'accepte pas encore les dossiers connectés (mise à jour en cours).".into());
+    }
+    let ok = resp.status().is_success();
+    let data: serde_json::Value = resp.json().await.unwrap_or(json!({}));
+    if !ok {
+        return Err(data.get("error").and_then(|v| v.as_str()).unwrap_or("Connexion refusée").to_string());
+    }
+    let id = data.get("id").and_then(|v| v.as_str()).ok_or("Réponse inattendue du serveur")?.to_string();
+    let _g = DOSSIERS_LOCK.lock().await;
+    let mut s = load_dossiers(&app);
+    s.items.push(dossiers::Dossier { id, label: label.clone(), path, visibilite: vis.into(), seen: snap, sent: 0, last_error: None });
+    save_dossiers(&app, &s);
+    Ok(json!({ "ok": true, "label": label, "dossiers": dossiers_view(&s) }))
+}
+
+/// Déconnexion depuis le poste : oublié ici tout de suite, et coupé dans l'espace si possible.
+#[tauri::command]
+async fn dossier_disconnect(app: AppHandle, id: String) -> Result<serde_json::Value, String> {
+    let c = load_config(&app);
+    let mut note = None;
+    if let (Some(device), Some(user)) = (c.token.clone(), user_token_get()) {
+        let r = reqwest::Client::new()
+            .delete(format!("{}/api/agent/connexions/{}", c.server_url.trim_end_matches('/'), id))
+            .bearer_auth(&user)
+            .header("x-device-token", &device)
+            .timeout(Duration::from_secs(20))
+            .send()
+            .await;
+        match r {
+            Ok(r) if r.status().is_success() || r.status() == reqwest::StatusCode::GONE => {}
+            _ => note = Some("Dossier oublié sur ce poste. S'il apparaît encore dans l'espace, déconnectez-le aussi depuis la page Agent de bureau."),
+        }
+    } else {
+        note = Some("Dossier oublié sur ce poste. S'il apparaît encore dans l'espace, déconnectez-le aussi depuis la page Agent de bureau.");
+    }
+    let _g = DOSSIERS_LOCK.lock().await;
+    let mut s = load_dossiers(&app);
+    s.items.retain(|d| d.id != id);
+    save_dossiers(&app, &s);
+    Ok(json!({ "ok": true, "note": note, "dossiers": dossiers_view(&s) }))
+}
+
+/// Issue de l'envoi d'un fichier.
+enum Envoi {
+    Ok,
+    /// Refus définitif pour ce fichier (antivirus, taille…) : on ne le renvoie pas.
+    Refus(String),
+    /// Connexion coupée dans l'espace : le dossier est oublié.
+    Coupe,
+    /// Session expirée : plus aucun envoi jusqu'à la reconnexion.
+    Session,
+    /// Réseau ou serveur indisponible : on réessaiera au passage suivant.
+    Plus,
+}
+
+async fn dossier_push(server: &str, user: &str, device: &str, id: &str, name: &str, bytes: &[u8]) -> Envoi {
+    let body = json!({
+        "name": name,
+        "mime": dossiers::mime_for(name),
+        "dataBase64": base64::engine::general_purpose::STANDARD.encode(bytes),
+    });
+    let r = reqwest::Client::new()
+        .post(format!("{server}/api/agent/connexions/{id}"))
+        .bearer_auth(user)
+        .header("x-device-token", device)
+        .json(&body)
+        .timeout(Duration::from_secs(120))
+        .send()
+        .await;
+    let Ok(r) = r else { return Envoi::Plus };
+    match r.status().as_u16() {
+        200..=299 => Envoi::Ok,
+        401 => Envoi::Session,
+        410 => Envoi::Coupe,
+        400 | 403 | 413 => {
+            let d: serde_json::Value = r.json().await.unwrap_or(json!({}));
+            Envoi::Refus(d.get("error").and_then(|v| v.as_str()).unwrap_or("Envoi refusé").to_string())
+        }
+        _ => Envoi::Plus,
+    }
+}
+
+/// Un passage : liste les connexions de la personne connectée, oublie celles coupées, envoie les nouveaux fichiers.
+async fn dossiers_pass(app: &AppHandle) {
+    let _g = DOSSIERS_LOCK.lock().await;
+    let mut s = load_dossiers(app);
+    if s.items.is_empty() {
+        return;
+    }
+    let c = load_config(app);
+    let (Some(device), Some(user)) = (c.token.clone(), user_token_get()) else { return };
+    let server = c.server_url.trim_end_matches('/').to_string();
+    let known = s.items.iter().map(|d| d.id.clone()).collect::<Vec<_>>().join(",");
+    let Ok(r) = reqwest::Client::new()
+        .get(format!("{server}/api/agent/connexions"))
+        .query(&[("known", known)])
+        .bearer_auth(&user)
+        .header("x-device-token", &device)
+        .timeout(Duration::from_secs(20))
+        .send()
+        .await
+    else {
+        return;
+    };
+    if r.status() == reqwest::StatusCode::UNAUTHORIZED {
+        lea_forget(app);
+        return;
+    }
+    if !r.status().is_success() {
+        return;
+    }
+    let data: serde_json::Value = r.json().await.unwrap_or(json!({}));
+    let ids = |k: &str| -> Vec<String> {
+        data.get(k)
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|x| x.get("id").and_then(|i| i.as_str()).or_else(|| x.as_str()).map(str::to_string)).collect())
+            .unwrap_or_default()
+    };
+    let gone = ids("gone");
+    // Les dossiers d'une autre personne restent en sommeil : seuls ceux de la personne connectée sont envoyés.
+    let mine = ids("connexions");
+    s.items.retain(|d| !gone.contains(&d.id));
+
+    let mut stop = false;
+    let mut cut: Vec<String> = vec![];
+    for d in s.items.iter_mut().filter(|d| mine.contains(&d.id)) {
+        if stop {
+            break;
+        }
+        let snap = match dossiers::snapshot(&d.path) {
+            Ok(x) => x,
+            Err(_) => {
+                d.last_error = Some("Dossier introuvable sur ce poste (déplacé ou supprimé ?).".into());
+                continue;
+            }
+        };
+        for name in dossiers::candidates(&d.seen, &snap, now_secs(), DOSSIERS_SETTLE_SECONDS, DOSSIERS_MAX_PER_PASS) {
+            let seen = snap[&name];
+            let p = d.path.join(&name);
+            if !ext_allowed(&p) {
+                d.seen.insert(name, seen);
+                continue;
+            }
+            if seen.len > SHARE_MAX_BYTES {
+                d.last_error = Some(format!("« {name} » dépasse 15 Mo : non envoyé."));
+                d.seen.insert(name, seen);
+                continue;
+            }
+            let Ok(bytes) = std::fs::read(&p) else { continue };
+            match dossier_push(&server, &user, &device, &d.id, &name, &bytes).await {
+                Envoi::Ok => {
+                    d.sent += 1;
+                    d.last_error = None;
+                    d.seen.insert(name, seen);
+                }
+                Envoi::Refus(e) => {
+                    d.last_error = Some(format!("« {name} » : {e}"));
+                    d.seen.insert(name, seen);
+                }
+                Envoi::Coupe => {
+                    cut.push(d.id.clone());
+                    break;
+                }
+                Envoi::Session => {
+                    stop = true;
+                    break;
+                }
+                Envoi::Plus => break,
+            }
+        }
+        dossiers::prune(&mut d.seen, &snap);
+    }
+    s.items.retain(|d| !cut.contains(&d.id));
+    save_dossiers(app, &s);
+    if stop {
+        lea_forget(app);
+    }
+    let _ = app.emit("dossiers", dossiers_view(&s));
+}
+
+async fn dossiers_loop(app: AppHandle) {
+    tokio::time::sleep(Duration::from_secs(30)).await;
+    loop {
+        dossiers_pass(&app).await;
+        tokio::time::sleep(Duration::from_secs(DOSSIERS_EVERY_SECONDS)).await;
+    }
+}
+
 /* ------------------------------ Bouclier en un clic ------------------------------ */
 
 fn bouclier_path(app: &AppHandle) -> PathBuf {
@@ -1475,6 +1753,9 @@ fn main() {
             lea_logout,
             lea_ask_full,
             share_file,
+            dossiers_list,
+            dossier_connect,
+            dossier_disconnect,
             lea_check
         ])
         .setup(|app| {
@@ -1539,6 +1820,12 @@ fn main() {
             let pst = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 posture_loop(pst).await;
+            });
+
+            // Dossiers connectés : nouveaux fichiers envoyés à l'espace, au nom de la personne connectée.
+            let dos = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                dossiers_loop(dos).await;
             });
 
             // Mise à jour automatique (silencieuse) au démarrage puis toutes les 6 heures.
