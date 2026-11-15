@@ -126,6 +126,18 @@
           <button id="display-btn" class="btn ghost">Afficher l'écran d'état</button>
           <button id="folder-btn" class="btn ghost">Ouvrir le dossier des fichiers reçus</button>
         </div>
+        <div class="share">
+          <p><strong>Partager un fichier avec mon espace</strong></p>
+          <p class="muted small">Vous choisissez le fichier sur cet ordinateur. Il est partagé à votre nom (connectez-vous dans la section Léa), et l'espace ne lit rien d'autre sur le poste. Vous pouvez le retirer depuis l'espace (Agent de bureau).</p>
+          <div class="row">
+            <select id="share-vis" aria-label="Pour qui">
+              <option value="moi">Pour moi seulement</option>
+              <option value="equipe">Pour l'équipe</option>
+            </select>
+            <button id="share-btn" class="btn ghost" type="button">Choisir un fichier…</button>
+          </div>
+          <p id="share-msg" class="muted small"></p>
+        </div>
         <div class="row">
           <button id="unpair-btn" class="btn ghost">Déconnecter ce poste</button>
         </div>

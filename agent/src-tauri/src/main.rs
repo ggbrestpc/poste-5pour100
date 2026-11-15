@@ -627,6 +627,65 @@ async fn lea_logout(app: AppHandle) {
 
 /// Vraie Léa, avec les droits de l'utilisateur connecté. Les actions sensibles restent à valider
 /// dans l'espace (mentionnées en fin de réponse).
+/// Taille maximale d'un fichier partagé (identique à la limite de l'espace).
+const SHARE_MAX_BYTES: u64 = 15 * 1024 * 1024;
+
+/// Partage choisi : la personne choisit elle-même un fichier sur cet ordinateur (fenêtre du système)
+/// et le partage avec son espace, à son nom (session de son compte), pour elle seule ou pour l'équipe.
+/// L'espace ne peut rien lire d'autre sur le poste.
+#[tauri::command]
+async fn share_file(app: AppHandle, visibilite: String) -> Result<serde_json::Value, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let vis = if visibilite == "equipe" { "equipe" } else { "moi" };
+    let c = load_config(&app);
+    let device = c.token.ok_or("Poste non relié.")?;
+    let user = user_token_get().ok_or("Connectez-vous avec votre compte (section Léa) pour partager un fichier à votre nom.")?;
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    app.dialog().file().set_title("Fichier à partager avec mon espace").pick_file(move |f| {
+        let _ = tx.send(f);
+    });
+    let Some(picked) = rx.await.map_err(|_| "Fenêtre de choix fermée.".to_string())? else {
+        return Ok(json!({ "ok": false, "cancelled": true }));
+    };
+    let path = picked.into_path().map_err(|_| "Ce fichier ne peut pas être lu.".to_string())?;
+    let meta = std::fs::metadata(&path).map_err(|e| format!("Lecture impossible : {e}"))?;
+    if !meta.is_file() {
+        return Err("Choisissez un fichier.".into());
+    }
+    if meta.len() == 0 || meta.len() > SHARE_MAX_BYTES {
+        return Err("Le fichier doit faire entre 1 octet et 15 Mo.".into());
+    }
+    let bytes = std::fs::read(&path).map_err(|e| format!("Lecture impossible : {e}"))?;
+    let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "fichier".into());
+    let body = json!({
+        "name": name,
+        "dataBase64": base64::engine::general_purpose::STANDARD.encode(&bytes),
+        "visibilite": vis,
+    });
+    let resp = reqwest::Client::new()
+        .post(format!("{}/api/agent/partage", c.server_url.trim_end_matches('/')))
+        .bearer_auth(&user)
+        .header("x-device-token", &device)
+        .json(&body)
+        .timeout(Duration::from_secs(120))
+        .send()
+        .await
+        .map_err(|e| format!("Connexion impossible : {e}"))?;
+    if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
+        lea_forget(&app);
+        return Err(SESSION_EXPIREE.to_string());
+    }
+    if resp.status() == reqwest::StatusCode::NOT_FOUND {
+        return Err("Votre espace n'accepte pas encore les partages depuis l'agent (mise à jour en cours).".into());
+    }
+    let ok = resp.status().is_success();
+    let data: serde_json::Value = resp.json().await.unwrap_or(json!({}));
+    if !ok {
+        return Err(data.get("error").and_then(|v| v.as_str()).unwrap_or("Partage refusé").to_string());
+    }
+    Ok(json!({ "ok": true, "name": name, "visibilite": vis }))
+}
+
 #[tauri::command]
 async fn lea_ask_full(app: AppHandle, message: String) -> Result<String, String> {
     let c = load_config(&app);
@@ -1387,6 +1446,7 @@ fn main() {
             }
         }))
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_autostart::init(
@@ -1414,6 +1474,7 @@ fn main() {
             lea_me,
             lea_logout,
             lea_ask_full,
+            share_file,
             lea_check
         ])
         .setup(|app| {

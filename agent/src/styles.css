@@ -100,3 +100,6 @@ details input { margin-top: 8px; width: 100%; }
 .boucl-ask { background: rgba(246, 223, 164, .08); border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px; }
 .boucl-ask p { margin: 0 0 8px; }
 .small { font-size: .85rem; }
+.share { border-top: 1px solid var(--line); padding-top: 8px; }
+.share p { margin: 0 0 6px; }
+.share select { flex: 0 0 auto; padding: 8px; border-radius: 10px; border: 1px solid var(--line); background: transparent; color: var(--text); }
