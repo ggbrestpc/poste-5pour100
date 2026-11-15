@@ -95,3 +95,8 @@ details input { margin-top: 8px; width: 100%; }
 .secu-list { list-style: none; padding: 0; margin: 8px 0; font-size: .9rem; line-height: 1.6; }
 .secu-alerte { color: #fbbf24; }
 .small-note a { color: #93c5fd; }
+
+.boucl { border-top: 1px solid var(--line); margin-top: 10px; padding-top: 8px; }
+.boucl-ask { background: rgba(246, 223, 164, .08); border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px; }
+.boucl-ask p { margin: 0 0 8px; }
+.small { font-size: .85rem; }

@@ -411,6 +411,44 @@ async function runSecurityCheck() {
   }
 }
 
+/* --- Bouclier en un clic : rien n'est changé sans « Accepter » ici, puis l'accord du système --- */
+function applyBouclier(b) {
+  if (!b) return;
+  const st = $("boucl-state");
+  const ask = $("boucl-ask");
+  if (b.applied) st.textContent = b.verified ? "Actif : le DNS de ce poste est protégé." : "Profil prêt : installez-le dans Réglages Système → Profils.";
+  else st.textContent = "Non activé sur ce poste.";
+  if (b.pending) {
+    $("boucl-text").textContent =
+      b.pending.action === "retirer"
+        ? "Votre espace retire le Bouclier de ce poste. Accepter remet vos réglages DNS d'origine (le système demandera l'accord administrateur)."
+        : b.os === "macos"
+          ? "Votre espace propose le Bouclier (DNS protecteur contre les sites dangereux et les publicités). Accepter ouvre un profil à installer dans Réglages Système."
+          : "Votre espace propose le Bouclier (DNS protecteur contre les sites dangereux et les publicités). Accepter règle le DNS de ce poste ; Windows demandera l'accord administrateur. Vos réglages actuels sont gardés pour pouvoir les remettre.";
+    $("boucl-yes").textContent = b.pending.action === "retirer" ? "Remettre mes réglages" : "Accepter";
+    ask.hidden = false;
+    $("secu").open = true;
+  } else {
+    ask.hidden = true;
+  }
+}
+async function bouclierAnswer(accept) {
+  const yes = $("boucl-yes");
+  const no = $("boucl-no");
+  const msg = $("boucl-msg");
+  yes.disabled = no.disabled = true;
+  msg.textContent = accept ? "Réglage en cours, répondez à la demande du système…" : "";
+  try {
+    const r = await invoke(accept ? "bouclier_accept" : "bouclier_refuse");
+    msg.textContent = r.message || "";
+    applyBouclier(r.status);
+  } catch (e) {
+    msg.textContent = String(e);
+  } finally {
+    yes.disabled = no.disabled = false;
+  }
+}
+
 window.addEventListener("DOMContentLoaded", () => {
   $("pair-btn").addEventListener("click", doPair);
   $("unpair-btn").addEventListener("click", doUnpair);
@@ -453,5 +491,9 @@ window.addEventListener("DOMContentLoaded", () => {
   // Notifications : son + lecture vocale selon les réglages.
   listen("notify", (ev) => onNotify(ev.payload));
   listen("posture", (ev) => applyPosture(ev.payload));
+  listen("bouclier", (ev) => applyBouclier(ev.payload));
+  $("boucl-yes")?.addEventListener("click", () => bouclierAnswer(true));
+  $("boucl-no")?.addEventListener("click", () => bouclierAnswer(false));
+  invoke("bouclier_status").then(applyBouclier).catch(() => {});
   refresh();
 });
