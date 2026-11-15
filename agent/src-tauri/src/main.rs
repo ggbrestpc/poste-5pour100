@@ -5,6 +5,7 @@
 #![cfg_attr(all(not(debug_assertions), target_os = "windows"), windows_subsystem = "windows")]
 
 mod bouclier;
+mod inventaire;
 mod posture;
 
 use std::path::{Path, PathBuf};
@@ -233,7 +234,7 @@ fn open_url(url: &str) {
 
 /// Impression : tente une impression directe, sinon ouvre le fichier pour impression manuelle.
 /// Renvoie true si une impression directe a pu être lancée.
-fn print_file(path: &Path) -> bool {
+fn print_file(path: &Path, printer: Option<&str>) -> bool {
     // Jamais d'impression (ni d'ouverture) d'un exécutable ou d'un script, même reçu du serveur.
     if !ext_allowed(path) {
         return false;
@@ -241,17 +242,32 @@ fn print_file(path: &Path) -> bool {
     let p = path.to_string_lossy().to_string();
     #[cfg(target_os = "windows")]
     {
-        let cmd = format!("Start-Process -FilePath '{}' -Verb Print", p.replace('\'', "''"));
+        let cmd = match printer {
+            Some(name) => format!(
+                "Start-Process -FilePath '{}' -Verb PrintTo -ArgumentList '\"{}\"'",
+                p.replace('\'', "''"),
+                name.replace('\'', "''")
+            ),
+            None => format!("Start-Process -FilePath '{}' -Verb Print", p.replace('\'', "''")),
+        };
         if Command::new("powershell").args(["-NoProfile", "-Command", &cmd]).spawn().is_ok() {
             return true;
         }
     }
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     {
-        if Command::new("lp").arg(&p).spawn().is_ok() {
+        let mut lp = Command::new("lp");
+        if let Some(name) = printer {
+            lp.arg("-d").arg(name);
+        }
+        if lp.arg(&p).spawn().is_ok() {
             return true;
         }
-        if Command::new("lpr").arg(&p).spawn().is_ok() {
+        let mut lpr = Command::new("lpr");
+        if let Some(name) = printer {
+            lpr.arg("-P").arg(name);
+        }
+        if lpr.arg(&p).spawn().is_ok() {
             return true;
         }
     }
@@ -900,10 +916,22 @@ async fn sync_loop(app: AppHandle, state: Arc<Mutex<Vec<serde_json::Value>>>) {
                     "impression_billet" => {
                         match fetch_payload_file(&client, &payload, &token, &server, &received_dir(&app), "billet.pdf").await {
                             Some(path) => {
-                                let printed = print_file(&path);
+                                // Imprimante choisie dans l'espace : utilisée seulement si elle est bien installée ici.
+                                let wanted = payload.get("printer").and_then(|v| v.as_str()).map(str::to_string);
+                                let printer = match wanted {
+                                    Some(w) if inventaire::safe_printer_name(&w) => {
+                                        let w2 = w.clone();
+                                        let installed = tauri::async_runtime::spawn_blocking(move || inventaire::printers().iter().any(|p| p.name == w2))
+                                            .await
+                                            .unwrap_or(false);
+                                        installed.then_some(w)
+                                    }
+                                    _ => None,
+                                };
+                                let printed = print_file(&path, printer.as_deref());
                                 let msg = if printed { "Billet envoyé à l'imprimante." } else { "Billet ouvert, prêt à imprimer." };
                                 let _ = app.notification().builder().title("5pour100 — billet").body(msg).show();
-                                acks.push(json!({ "jobId": id, "result": { "ok": true, "printed": printed } }));
+                                acks.push(json!({ "jobId": id, "result": { "ok": true, "printed": printed, "printer": printer } }));
                             }
                             None => acks.push(json!({ "jobId": id, "error": "billet introuvable (champ url ou base64 manquant)" })),
                         }
@@ -1095,11 +1123,28 @@ async fn report_posture(app: &AppHandle) -> Result<serde_json::Value, String> {
     Ok(body)
 }
 
+/// Envoie la liste des imprimantes du poste à l'espace (lecture seule).
+async fn report_inventaire(app: &AppHandle) -> Result<(), String> {
+    let printers = tauri::async_runtime::spawn_blocking(inventaire::printers).await.map_err(|e| e.to_string())?;
+    let c = load_config(app);
+    let Some(token) = c.token else { return Ok(()) };
+    reqwest::Client::new()
+        .post(format!("{}/api/agent/inventaire", c.server_url.trim_end_matches('/')))
+        .bearer_auth(&token)
+        .json(&json!({ "printers": printers }))
+        .timeout(Duration::from_secs(20))
+        .send()
+        .await
+        .map_err(|e| format!("envoi impossible : {e}"))?;
+    Ok(())
+}
+
 /// Bilan au démarrage (après une minute, pour ne pas ralentir l'ouverture de session) puis chaque jour.
 async fn posture_loop(app: AppHandle) {
     tokio::time::sleep(Duration::from_secs(60)).await;
     loop {
         let _ = report_posture(&app).await;
+        let _ = report_inventaire(&app).await;
         // Profil Bouclier installé plus tard (macOS) : constaté au bilan suivant.
         let _ = bouclier_verify(&app).await;
         tokio::time::sleep(Duration::from_secs(POSTURE_EVERY_SECONDS)).await;
@@ -1291,6 +1336,7 @@ async fn bouclier_refuse(app: AppHandle) -> Result<serde_json::Value, String> {
 /// Bilan à la demande (bouton « Refaire le bilan » de la fenêtre de l'agent).
 #[tauri::command]
 async fn security_check(app: AppHandle) -> Result<serde_json::Value, String> {
+    let _ = report_inventaire(&app).await;
     report_posture(&app).await
 }
 
@@ -1523,7 +1569,7 @@ mod tests {
 
     #[test]
     fn executable_jamais_imprime() {
-        assert!(!print_file(Path::new("/tmp/x.exe")));
-        assert!(!print_file(Path::new("/tmp/script.sh")));
+        assert!(!print_file(Path::new("/tmp/x.exe"), None));
+        assert!(!print_file(Path::new("/tmp/script.sh"), Some("HP")));
     }
 }
